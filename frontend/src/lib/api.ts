@@ -15,6 +15,15 @@ export interface ApiJob {
   modified_at: string;
 }
 
+export interface UploadMetadata {
+  id: string;
+  project_id: string;
+  job_id: string;
+  original_filename: string;
+  file_size: number;
+  uploaded_at: string;
+}
+
 export interface RecordPayload {
   name: string;
   description: string;
@@ -30,7 +39,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ...init,
       headers: {
         Accept: "application/json",
-        ...(init?.body ? { "Content-Type": "application/json" } : {}),
+        ...(init?.body && !(init.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
         ...init?.headers,
       },
     });
@@ -56,6 +65,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(message);
   }
 
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
@@ -74,4 +84,19 @@ export const api = {
     method: "POST",
     body: JSON.stringify(payload),
   }),
+  listUploads: (projectId: string, jobId: string) => request<UploadMetadata[]>(
+    `/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/uploads`,
+  ),
+  deleteUpload: (projectId: string, jobId: string, uploadId: string) => request<void>(
+    `/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/uploads/${encodeURIComponent(uploadId)}`,
+    { method: "DELETE" },
+  ),
+  uploadFile: (projectId: string, jobId: string, file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return request<UploadMetadata>(
+      `/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/uploads`,
+      { method: "POST", body: formData },
+    );
+  },
 };

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from pathlib import Path, PureWindowsPath
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from sqlalchemy import select
@@ -172,3 +173,62 @@ def list_uploads(project_id: str, job_id: str, db: Session = Depends(get_session
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found in this project.")
     statement = select(Upload).where(Upload.project_id == project_id, Upload.job_id == job_id).order_by(Upload.uploaded_at.desc(), Upload.id)
     return list(db.scalars(statement).all())
+
+
+@router.delete(
+    "/api/projects/{project_id}/jobs/{job_id}/uploads/{upload_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["uploads"],
+)
+def delete_upload(
+    project_id: str,
+    job_id: str,
+    upload_id: str,
+    request: Request,
+    db: Session = Depends(get_session),
+) -> None:
+    if db.get(Project, project_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+
+    job = db.scalar(select(Job).where(Job.id == job_id, Job.project_id == project_id))
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found in this project.")
+
+    upload = db.scalar(select(Upload).where(
+        Upload.id == upload_id,
+        Upload.project_id == project_id,
+        Upload.job_id == job_id,
+    ))
+    if upload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found for this job.")
+
+    storage_dir = Path(request.app.state.settings.upload_dir).resolve()
+    stored_name = upload.storage_filename
+    if (
+        Path(stored_name).name != stored_name
+        or PureWindowsPath(stored_name).name != stored_name
+        or Path(stored_name).is_absolute()
+        or PureWindowsPath(stored_name).is_absolute()
+    ):
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Stored upload location is invalid.")
+    stored_path = (storage_dir / stored_name).resolve()
+    if stored_path == storage_dir or not stored_path.is_relative_to(storage_dir):
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Stored upload location is invalid.")
+
+    try:
+        stored_path.unlink(missing_ok=True)
+    except OSError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="The uploaded file could not be removed from storage.",
+        ) from None
+
+    try:
+        db.delete(upload)
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="The file was removed, but its metadata could not be deleted.",
+        ) from None

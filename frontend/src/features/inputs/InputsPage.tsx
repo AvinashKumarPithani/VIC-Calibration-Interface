@@ -1,5 +1,6 @@
-import { Fragment, useRef, useState, type ChangeEvent } from "react";
+import { Fragment, useEffect, useRef, useState, type ChangeEvent } from "react";
 import { Link } from "react-router-dom";
+import { api, type UploadMetadata } from "../../lib/api";
 import type { CalibrationJob, Project } from "../setup/types";
 import { configurationSections, exampleConfiguration, exampleDependencies, exampleParsedSettings } from "./mockData";
 import type { ValidationFinding } from "./types";
@@ -13,27 +14,136 @@ const cardClass = "rounded-xl border border-slate-200 bg-white p-2.5 shadow-sm";
 const secondaryButton = "inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500";
 const primaryButton = "inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600";
 
+function formatFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatUploadDate(value: string) {
+  return new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+}
+
 export default function InputsPage({ project, job }: InputsPageProps) {
   const fileInput = useRef<HTMLInputElement>(null);
-  const [localFileName, setLocalFileName] = useState<string | null>(null);
+  const currentContext = useRef({ projectId: project?.id, jobId: job?.id });
+  currentContext.current = { projectId: project?.id, jobId: job?.id };
+  const [uploads, setUploads] = useState<UploadMetadata[]>([]);
+  const [uploadsLoading, setUploadsLoading] = useState(false);
+  const [uploadsError, setUploadsError] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadSuccess, setUploadSuccess] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<UploadMetadata | null>(null);
+  const [deletingUploadId, setDeletingUploadId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [selectedConfigurationUploadId, setSelectedConfigurationUploadId] = useState<string | null>(null);
   const [showConfiguration, setShowConfiguration] = useState(true);
   const [findings, setFindings] = useState<ValidationFinding[] | null>(null);
   const [expandedDependency, setExpandedDependency] = useState<string | null>(null);
 
-  function handleFileSelection(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    setLocalFileName(file.name);
+  useEffect(() => {
+    if (!project || !job || job.projectId !== project.id) {
+      setUploads([]);
+      setUploadsLoading(false);
+      setUploadsError(null);
+      return;
+    }
+
+    let active = true;
+    setUploads([]);
+    setUploadsLoading(true);
+    setUploadsError(null);
+    setSelectedConfigurationUploadId(null);
+    setUploadSuccess(null);
+    setUploadError(null);
+    setPendingDelete(null);
+    setDeleteError(null);
     setFindings(null);
+    api.listUploads(project.id, job.id).then((records) => {
+      if (active) setUploads(records);
+    }).catch((error: unknown) => {
+      if (active) setUploadsError(error instanceof Error ? error.message : "Uploaded files could not be loaded.");
+    }).finally(() => {
+      if (active) setUploadsLoading(false);
+    });
+
+    return () => { active = false; };
+  }, [project?.id, job?.id]);
+
+  async function handleFileSelection(event: ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    if (!project || !job || job.projectId !== project.id) return;
+
+    setUploading(true);
+    setUploadError(null);
+    setUploadsError(null);
+    setUploadSuccess(null);
+    setFindings(null);
+
+    try {
+      const uploaded = await api.uploadFile(project.id, job.id, file);
+      if (uploaded.project_id !== project.id || uploaded.job_id !== job.id) {
+        throw new Error("The API returned upload metadata for a different project or job.");
+      }
+      setSelectedConfigurationUploadId(uploaded.id);
+      setUploads((current) => [uploaded, ...current.filter((item) => item.id !== uploaded.id)]);
+      setUploadSuccess(`${uploaded.original_filename} uploaded (${formatFileSize(uploaded.file_size)}). Its contents have not been checked.`);
+
+      try {
+        const refreshed = await api.listUploads(project.id, job.id);
+        setUploads(refreshed);
+      } catch (error) {
+        setUploadsError(error instanceof Error ? `Upload succeeded, but the file list could not be refreshed: ${error.message}` : "Upload succeeded, but the file list could not be refreshed.");
+      }
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : "The file could not be uploaded.");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function confirmDeleteUpload() {
+    if (!project || !job || job.projectId !== project.id || !pendingDelete || deletingUploadId) return;
+    const target = pendingDelete;
+    setDeletingUploadId(target.id);
+    setDeleteError(null);
+    try {
+      await api.deleteUpload(project.id, job.id, target.id);
+      if (currentContext.current.projectId !== project.id || currentContext.current.jobId !== job.id) return;
+      setUploads((current) => current.filter((upload) => upload.id !== target.id));
+      setSelectedConfigurationUploadId((current) => current === target.id ? null : current);
+      setUploadSuccess(`${target.original_filename} deleted.`);
+      setPendingDelete(null);
+      try {
+        const refreshed = await api.listUploads(project.id, job.id);
+        if (currentContext.current.projectId === project.id && currentContext.current.jobId === job.id) {
+          setUploads(refreshed);
+        }
+      } catch (error) {
+        if (currentContext.current.projectId !== project.id || currentContext.current.jobId !== job.id) return;
+        const message = error instanceof Error ? error.message : "The uploaded-file list could not be refreshed.";
+        setUploadsError(`File deleted, but the list could not be refreshed: ${message}`);
+      }
+    } catch (error) {
+      if (currentContext.current.projectId === project.id && currentContext.current.jobId === job.id) {
+        setDeleteError(error instanceof Error ? error.message : "The uploaded file could not be deleted.");
+      }
+    } finally {
+      setDeletingUploadId(null);
+    }
   }
 
   function validateMockInputs() {
     setFindings([
       {
         severity: "issue",
-        message: localFileName
-          ? "A local file was selected, but no RAT configuration is linked to this job or available on the server."
-          : "No RAT configuration is linked to this job in the current prototype.",
+        message: uploads.length > 0
+          ? "Upload metadata is available, but no file has been parsed or confirmed as this job's RAT configuration."
+          : "No files have been uploaded for this job.",
       },
       {
         severity: "warning",
@@ -67,6 +177,28 @@ export default function InputsPage({ project, job }: InputsPageProps) {
 
   return (
     <div className="min-h-[calc(100vh-5rem)] bg-[#f5f8fc] p-3 sm:p-5 xl:h-[calc(100dvh-6rem)] xl:min-h-0 xl:overflow-hidden xl:p-4">
+      {pendingDelete && (
+        <div
+          className="fixed inset-0 z-50 grid place-items-center bg-slate-950/40 p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && deletingUploadId === null) setPendingDelete(null);
+          }}
+        >
+          <section role="alertdialog" aria-modal="true" aria-labelledby="delete-upload-title" aria-describedby="delete-upload-description" className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl">
+            <h2 id="delete-upload-title" className="text-lg font-semibold text-slate-900">Delete uploaded file?</h2>
+            <p id="delete-upload-description" className="mt-2 break-words text-sm leading-5 text-slate-600">
+              Permanently delete <strong className="text-slate-800">{pendingDelete.original_filename}</strong> from this job?
+            </p>
+            {deleteError && <p role="alert" className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{deleteError}</p>}
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" disabled={deletingUploadId !== null} onClick={() => setPendingDelete(null)} className={secondaryButton + " disabled:opacity-50"}>Cancel</button>
+              <button type="button" disabled={deletingUploadId !== null} onClick={confirmDeleteUpload} className="inline-flex items-center justify-center rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-700 disabled:cursor-wait disabled:opacity-60">
+                {deletingUploadId ? "Deleting…" : "Delete file"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
       <div className="mx-auto max-w-[1680px] xl:flex xl:h-full xl:min-h-0 xl:flex-col">
         <div className="grid min-h-0 items-stretch gap-3 xl:flex-1 xl:overflow-hidden xl:grid-cols-[210px_minmax(0,1fr)_370px]">
           <aside className="flex min-h-[360px] flex-col rounded-xl border border-slate-200 bg-white p-2.5 shadow-sm xl:h-full xl:min-h-0" aria-label="Current project and job">
@@ -86,11 +218,11 @@ export default function InputsPage({ project, job }: InputsPageProps) {
             <header className="px-1 pb-1 xl:row-start-1">
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-blue-700">
                 Step 02 / RAT + VIC calibration
-                <span className="ml-2 rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-sky-800">Prototype data</span>
+                <span className="ml-2 rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-sky-800">Live uploads · mock summaries</span>
               </p>
               <h1 className="mt-1 text-xl font-bold tracking-tight text-slate-950">2. Inputs &amp; Configuration</h1>
               <p className="mt-1 max-w-3xl text-sm leading-5 text-slate-600">
-                Inspect this job&apos;s RAT configuration, referenced dependencies, and input readiness. No RAT or VIC run is started here.
+                View this job&apos;s uploaded files and illustrative configuration details. Uploading does not parse or validate files.
               </p>
             </header>
 
@@ -100,37 +232,34 @@ export default function InputsPage({ project, job }: InputsPageProps) {
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">A. Main RAT configuration</p>
                   <h2 id="config-heading" className="mt-0.5 text-sm font-semibold text-slate-900">rat_config.yaml</h2>
-                  <p className="mt-0.5 text-[11px] leading-4 text-slate-600">Expected main configuration filename. No configuration is attached to this mock job.</p>
+                  <p className="mt-0.5 text-[11px] leading-4 text-slate-600">Upload a local YAML configuration to this job. The backend records the file but does not parse it.</p>
                 </div>
-                <span className="w-fit shrink-0 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">Not loaded</span>
+                <span className="w-fit shrink-0 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">{selectedConfigurationUploadId ? "Uploaded · not parsed" : uploads.length > 0 ? "Upload role not recorded" : "No configuration selected"}</span>
               </div>
 
               <div className="mt-1.5 grid gap-1.5 sm:grid-cols-[minmax(0,1fr)_230px] sm:items-start">
                 <dl className="grid gap-1">
                   <div className="rounded-lg bg-slate-50 px-2 py-1">
                     <dt className="font-medium text-slate-500">Source</dt>
-                    <dd className="mt-0.5 text-[10px] leading-3 text-slate-800">{localFileName ? "Selected in this browser only" : "No source selected"}</dd>
+                    <dd className="mt-0.5 text-[10px] leading-3 text-slate-800">{selectedConfigurationUploadId ? "Uploaded to this job" : uploads.length > 0 ? "Existing uploads are not classified" : "No configuration uploaded"}</dd>
                   </div>
                   <div className="rounded-lg bg-slate-50 px-2 py-1">
-                    <dt className="font-medium text-slate-500">Server location</dt>
-                    <dd className="mt-0.5 text-[10px] leading-3 text-slate-800">Not available in prototype</dd>
+                    <dt className="font-medium text-slate-500">Stored path</dt>
+                    <dd className="mt-0.5 text-[10px] leading-3 text-slate-800">Not exposed by the API</dd>
                   </div>
                 </dl>
 
                 <div className="flex flex-col gap-1">
-                  <input ref={fileInput} type="file" accept=".yaml,.yml" className="sr-only" aria-label="Select a local RAT configuration file" onChange={handleFileSelection} />
-                  <button type="button" onClick={() => fileInput.current?.click()} className={secondaryButton + " justify-start px-2.5 py-1.5 text-xs"}>Select Configuration</button>
+                  <input ref={fileInput} type="file" accept=".yaml,.yml" disabled={uploading || uploadsLoading} className="sr-only" aria-label="Select a local RAT configuration file" onChange={handleFileSelection} />
+                  <button type="button" disabled={uploading || uploadsLoading} onClick={() => fileInput.current?.click()} className={secondaryButton + " justify-start px-2.5 py-1.5 text-xs disabled:cursor-wait disabled:opacity-60"}>{uploadsLoading ? "Loading uploads…" : uploading ? "Uploading…" : "Select Configuration"}</button>
                   <button type="button" onClick={() => setShowConfiguration((shown) => !shown)} className={secondaryButton + " justify-start px-2.5 py-1.5 text-xs"}>
                     {showConfiguration ? "Hide Example Configuration" : "View Example Configuration"}
                   </button>
                   <button type="button" onClick={validateMockInputs} className={secondaryButton + " justify-start px-2.5 py-1.5 text-xs"}>Validate Configuration (mock check)</button>
                 </div>
               </div>
-              {localFileName && (
-                <p role="status" className="mt-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs leading-4 text-sky-900">
-                  Selected locally: <strong>{localFileName}</strong>. The file was not uploaded, read, or associated with this job.
-                </p>
-              )}
+              {uploadError && <p role="alert" className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs leading-4 text-rose-800">{uploadError}</p>}
+              {uploadSuccess && <p role="status" className="mt-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs leading-4 text-sky-900">{uploadSuccess}</p>}
             </section>
 
             <section className={cardClass + " min-w-0"} aria-labelledby="overview-heading">
@@ -162,6 +291,15 @@ export default function InputsPage({ project, job }: InputsPageProps) {
                 <span className="text-[11px] text-slate-500">Statuses are not checked against a RAT environment.</span>
               </div>
               <div className="mt-1.5 min-h-0 flex-1 overflow-x-auto rounded-lg border border-slate-200">
+                <div className="border-b border-slate-200 p-2">
+                  <h3 className="text-xs font-semibold text-slate-800">Uploaded files for this job</h3>
+                  <p className="mt-0.5 text-[10px] text-slate-500">Upload metadata only; file contents and scientific validity are not checked.</p>
+                  {uploadsLoading && <p className="mt-2 text-xs text-slate-500">Loading uploaded files…</p>}
+                  {uploadsError && <p role="alert" className="mt-2 text-xs text-rose-700">{uploadsError}</p>}
+                  {!uploadsLoading && !uploadsError && uploads.length === 0 && <p className="mt-2 text-xs text-slate-500">No files uploaded for this job.</p>}
+                  {uploads.length > 0 && <div className="mt-1 overflow-x-auto"><table className="w-full min-w-[520px] text-left text-[10px]"><thead className="text-slate-500"><tr><th className="px-1 py-1 font-medium">Filename</th><th className="px-1 py-1 font-medium">Size</th><th className="px-1 py-1 font-medium">Uploaded</th><th className="px-1 py-1 font-medium">Check</th><th className="px-1 py-1 font-medium">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{uploads.map((upload) => <tr key={upload.id}><td className="max-w-48 truncate px-1 py-1.5 font-medium text-slate-700" title={upload.original_filename}>{upload.original_filename}</td><td className="whitespace-nowrap px-1 py-1.5 text-slate-600">{formatFileSize(upload.file_size)}</td><td className="whitespace-nowrap px-1 py-1.5 text-slate-600">{formatUploadDate(upload.uploaded_at)}</td><td className="whitespace-nowrap px-1 py-1.5 text-slate-600">Uploaded; not checked</td><td className="whitespace-nowrap px-1 py-1.5"><button type="button" disabled={deletingUploadId !== null || uploading} onClick={() => { setDeleteError(null); setPendingDelete(upload); }} className="rounded-md px-2 py-1 text-[11px] font-semibold text-rose-700 hover:bg-rose-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-rose-500 disabled:cursor-not-allowed disabled:opacity-50">Delete</button></td></tr>)}</tbody></table></div>}
+                </div>
+                <h3 className="px-2 pt-2 text-xs font-semibold text-slate-700">Illustrative dependencies · not checked</h3>
                 <table className="w-full min-w-[740px] border-collapse text-left text-xs">
                   <thead className="sticky top-0 z-10 bg-slate-50 text-[11px] font-semibold text-slate-700">
                     <tr>
