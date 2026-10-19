@@ -1,4 +1,4 @@
-from fastapi.testclient import TestClient
+﻿from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.main import create_app
@@ -163,3 +163,42 @@ def test_records_and_uploads_survive_new_app_instance(
         assert len(second_client.get(f"/api/projects/{project['id']}/jobs/{job['id']}/uploads").json()) == 1
 
     assert len(list(backend_settings.upload_dir.iterdir())) == 1
+
+
+def test_update_project_persists_name_and_description(client: TestClient) -> None:
+    created = client.post("/api/projects", json={"name": "Before", "description": "Old description"})
+    project_id = created.json()["id"]
+    original_modified = created.json()["modified_at"]
+
+    response = client.put(
+        f"/api/projects/{project_id}",
+        json={"name": "After", "description": "New description"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == project_id
+    assert response.json()["name"] == "After"
+    assert response.json()["description"] == "New description"
+    assert response.json()["modified_at"] >= original_modified
+    persisted = client.get(f"/api/projects/{project_id}")
+    assert persisted.json()["name"] == "After"
+    assert persisted.json()["description"] == "New description"
+
+
+def test_update_missing_project_returns_404(client: TestClient) -> None:
+    response = client.put(
+        "/api/projects/missing-project",
+        json={"name": "After", "description": "Description"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Project not found."
+
+
+def test_update_project_uses_existing_validation(client: TestClient) -> None:
+    created = client.post("/api/projects", json={"name": "Before"})
+    project_id = created.json()["id"]
+
+    response = client.put(f"/api/projects/{project_id}", json={"name": "   "})
+
+    assert response.status_code == 422

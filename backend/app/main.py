@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
@@ -45,6 +46,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version="0.1.0",
         description="Local project, job, and upload metadata API. Scientific workflows are not executed.",
         lifespan=lifespan,
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_methods=["GET", "POST", "PUT"],
+        allow_headers=["Accept", "Content-Type"],
     )
     app.state.settings = app_settings
     app.state.engine = engine

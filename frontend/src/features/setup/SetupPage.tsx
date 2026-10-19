@@ -8,11 +8,15 @@ interface SetupPageProps {
   selectedProjectId: string | null;
   selectedJobId: string | null;
   onSelectProject: (projectId: string) => void;
-  onCreateProject: (draft: ProjectDraft) => Project;
-  onUpdateProject: (projectId: string, draft: ProjectDraft) => void;
-  onCreateJob: (draft: JobDraft) => CalibrationJob;
-  onDuplicateJob: (jobId: string) => CalibrationJob;
+  onCreateProject: (draft: ProjectDraft) => Promise<Project>;
+  onUpdateProject: (projectId: string, draft: ProjectDraft) => Promise<void>;
+  onCreateJob: (draft: JobDraft) => Promise<CalibrationJob>;
+  onDuplicateJob: (jobId: string) => Promise<CalibrationJob>;
   onSelectJob: (jobId: string) => void;
+  projectsLoading: boolean;
+  projectsError: string | null;
+  jobsLoading: boolean;
+  jobsError: string | null;
 }
 
 type DialogState = "new-project" | "edit-project" | "new-job" | null;
@@ -59,7 +63,7 @@ const secondaryButton = "inline-flex items-center justify-center gap-2 rounded-l
 
 export default function SetupPage({
   projects, jobs, selectedProjectId, selectedJobId, onSelectProject, onCreateProject,
-  onUpdateProject, onCreateJob, onDuplicateJob, onSelectJob,
+  onUpdateProject, onCreateJob, onDuplicateJob, onSelectJob, projectsLoading, projectsError, jobsLoading, jobsError,
 }: SetupPageProps) {
   const navigate = useNavigate();
   const [projectSearch, setProjectSearch] = useState("");
@@ -67,6 +71,8 @@ export default function SetupPage({
   const [dialog, setDialog] = useState<DialogState>(null);
   const [resultJob, setResultJob] = useState<CalibrationJob | null>(null);
   const [feedback, setFeedback] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [saving, setSaving] = useState(false);
 
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
   const projectJobs = jobs.filter((job) => job.projectId === selectedProjectId);
@@ -80,22 +86,30 @@ export default function SetupPage({
     return projectJobs.filter((job) => `${job.name} ${job.id} ${job.status}`.toLowerCase().includes(query));
   }, [jobSearch, projectJobs]);
 
-  function handleProjectSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleProjectSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
     const draft = { name: String(formData.get("name")).trim(), description: String(formData.get("description")).trim() };
     if (!draft.name) return;
-    if (dialog === "edit-project" && selectedProject) {
-      onUpdateProject(selectedProject.id, draft);
-      setFeedback("Project details updated.");
-    } else {
-      onCreateProject(draft);
-      setFeedback("Project created and selected.");
+    setSaving(true);
+    setActionError("");
+    try {
+      if (dialog === "edit-project" && selectedProject) {
+        await onUpdateProject(selectedProject.id, draft);
+        setFeedback("Project details updated.");
+      } else {
+        await onCreateProject(draft);
+        setFeedback("Project created and selected.");
+      }
+      setDialog(null);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Project could not be saved.");
+    } finally {
+      setSaving(false);
     }
-    setDialog(null);
   }
 
-  function handleJobSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleJobSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
     const draft: JobDraft = {
@@ -104,10 +118,18 @@ export default function SetupPage({
       copyFromJobId: String(formData.get("copyFromJobId") ?? ""),
     };
     if (!draft.name) return;
-    const job = onCreateJob(draft);
-    setDialog(null);
-    setFeedback(`${job.name} created. Opening Inputs.`);
-    navigate("/inputs");
+    setSaving(true);
+    setActionError("");
+    try {
+      const job = await onCreateJob(draft);
+      setDialog(null);
+      setFeedback(`${job.name} created. Opening Inputs.`);
+      navigate("/inputs");
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Job could not be created.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   function openJob(job: CalibrationJob) {
@@ -116,9 +138,14 @@ export default function SetupPage({
     navigate("/inputs");
   }
 
-  function duplicateJob(job: CalibrationJob) {
-    const duplicate = onDuplicateJob(job.id);
-    setFeedback(`${duplicate.name} created without copied run history or results.`);
+  async function duplicateJob(job: CalibrationJob) {
+    setActionError("");
+    try {
+      const duplicate = await onDuplicateJob(job.id);
+      setFeedback(`${duplicate.name} created as a new job. No results were copied.`);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Job could not be duplicated.");
+    }
   }
 
   return (
@@ -140,7 +167,7 @@ export default function SetupPage({
           <div className="mt-2 min-h-0 flex-1 space-y-1 overflow-y-auto" aria-label="Projects">
             {visibleProjects.map((project) => {
               const isSelected = project.id === selectedProjectId;
-              const count = jobs.filter((job) => job.projectId === project.id).length;
+              const count = project.id === selectedProjectId ? projectJobs.length : null;
               return (
                 <button
                   key={project.id}
@@ -151,12 +178,14 @@ export default function SetupPage({
                 >
                   <span className="flex items-start gap-2.5"><Icon>{isSelected ? "▤" : "▧"}</Icon><span className="min-w-0">
                     <span className="block truncate text-sm font-semibold">{project.name}</span>
-                    <span className="mt-1 block text-xs text-slate-500">{count} {count === 1 ? "job" : "jobs"} · Updated {formatDate(project.modifiedAt)}</span>
+                    <span className="mt-1 block text-xs text-slate-500">{count === null ? "Select to load jobs" : `${count} ${count === 1 ? "job" : "jobs"}`} · Updated {formatDate(project.modifiedAt)}</span>
                   </span></span>
                 </button>
               );
             })}
-            {visibleProjects.length === 0 && (
+            {projectsLoading && <p className="px-3 py-4 text-sm text-slate-500">Loading projects…</p>}
+            {projectsError && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-sm text-rose-800">{projectsError}</p>}
+            {!projectsLoading && !projectsError && visibleProjects.length === 0 && (
               <div className="rounded-lg border border-dashed border-slate-300 px-4 py-8 text-center">
                 <p className="text-sm font-medium text-slate-700">No projects found</p>
                 <p className="mt-1 text-xs text-slate-500">Try another search or create a project.</p>
@@ -165,7 +194,7 @@ export default function SetupPage({
           </div>
           <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5 text-xs leading-5 text-slate-600">
             <p className="font-semibold text-slate-800">Prototype workspace</p>
-            <p>Changes are held in memory and reset when the page is refreshed.</p>
+            <p>Projects and jobs are saved by the local API.</p>
           </div>
         </aside>
 
@@ -178,7 +207,7 @@ export default function SetupPage({
             </div>
           </section>
 
-          {feedback && <div role="status" className="flex items-start justify-between gap-3 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900"><span>{feedback}</span><button type="button" onClick={() => setFeedback("")} aria-label="Dismiss message" className="font-semibold">×</button></div>}
+          {actionError && <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{actionError}</div>}{feedback && <div role="status" className="flex items-start justify-between gap-3 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900"><span>{feedback}</span><button type="button" onClick={() => setFeedback("")} aria-label="Dismiss message" className="font-semibold">×</button></div>}
 
           {selectedProject ? (
             <>
@@ -216,7 +245,9 @@ export default function SetupPage({
                       <th className="px-2 py-1.5">Job ID</th><th className="px-2 py-1.5">Job Name</th><th className="px-2 py-1.5">Created On</th><th className="px-2 py-1.5">Last Modified</th><th className="px-2 py-1.5">Status</th><th className="px-2 py-1.5">Best NSE</th><th className="px-2 py-1.5">Actions</th>
                     </tr></thead>
                     <tbody className="divide-y divide-slate-100">
-                      {visibleJobs.map((job) => (
+                      {jobsLoading && <tr><td colSpan={7} className="px-4 py-8 text-center text-slate-500">Loading jobs…</td></tr>}
+                      {jobsError && <tr><td colSpan={7} role="alert" className="px-4 py-8 text-center text-rose-700">{jobsError}</td></tr>}
+                      {!jobsLoading && !jobsError && visibleJobs.map((job) => (
                         <tr key={job.id} className={job.id === selectedJobId ? "bg-sky-50/60" : "bg-white hover:bg-slate-50/70"}>
                           <td className="whitespace-nowrap px-2 py-1.5 font-medium text-slate-600">{job.id}</td>
                           <td className="whitespace-nowrap px-2 py-1.5"><span className="font-semibold text-slate-900">{job.name}</span>{job.id === selectedJobId && <span className="ml-2 rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-800">Current</span>}</td>
@@ -231,7 +262,7 @@ export default function SetupPage({
                           </div></td>
                         </tr>
                       ))}
-                      {visibleJobs.length === 0 && <tr><td colSpan={7} className="px-4 py-10 text-center"><p className="font-medium text-slate-700">{projectJobs.length === 0 ? "No jobs in this project yet" : "No jobs match your search"}</p><p className="mt-1 text-sm text-slate-500">{projectJobs.length === 0 ? "Create a calibration job to get started." : "Try a different job name, ID, or status."}</p></td></tr>}
+                      {!jobsLoading && !jobsError && visibleJobs.length === 0 && <tr><td colSpan={7} className="px-4 py-10 text-center"><p className="font-medium text-slate-700">{projectJobs.length === 0 ? "No jobs in this project yet" : "No jobs match your search"}</p><p className="mt-1 text-sm text-slate-500">{projectJobs.length === 0 ? "Create a calibration job to get started." : "Try a different job name, ID, or status."}</p></td></tr>}
                     </tbody>
                   </table>
                 </div>
@@ -276,29 +307,32 @@ export default function SetupPage({
 
       {dialog === "new-project" && <Modal title="Create a Project" onClose={() => setDialog(null)}>
         <form onSubmit={handleProjectSubmit} className="space-y-4">
+          {actionError && <p role="alert" className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-800">{actionError}</p>}
           <Field label="Project Name" required><input name="name" autoFocus required maxLength={100} placeholder="e.g., Krishna_Basin_Calibration" className={inputClass} /></Field>
           <Field label="Description (optional)"><textarea name="description" rows={3} maxLength={500} placeholder="What is this project for?" className={`${inputClass} resize-y`} /></Field>
-          <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" onClick={() => setDialog(null)} className={secondaryButton}>Cancel</button><button type="submit" className={primaryButton}>Create Project</button></div>
+          <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" onClick={() => setDialog(null)} className={secondaryButton}>Cancel</button><button type="submit" disabled={saving} className={primaryButton}>{saving ? "Saving…" : "Create Project"}</button></div>
         </form>
       </Modal>}
 
       {dialog === "edit-project" && selectedProject && <Modal title="Edit Project" onClose={() => setDialog(null)}>
         <form key={selectedProject.id} onSubmit={handleProjectSubmit} className="space-y-4">
+          {actionError && <p role="alert" className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-800">{actionError}</p>}
           <Field label="Project Name" required><input name="name" autoFocus required maxLength={100} defaultValue={selectedProject.name} className={inputClass} /></Field>
           <Field label="Description (optional)"><textarea name="description" rows={3} maxLength={500} defaultValue={selectedProject.description} className={`${inputClass} resize-y`} /></Field>
-          <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" onClick={() => setDialog(null)} className={secondaryButton}>Cancel</button><button type="submit" className={primaryButton}>Save Changes</button></div>
+          <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" onClick={() => setDialog(null)} className={secondaryButton}>Cancel</button><button type="submit" disabled={saving} className={primaryButton}>{saving ? "Saving…" : "Save Changes"}</button></div>
         </form>
       </Modal>}
 
       {dialog === "new-job" && <Modal title="Create a New Calibration Job" onClose={() => setDialog(null)}>
         <form onSubmit={handleJobSubmit} className="space-y-4">
+          {actionError && <p role="alert" className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-800">{actionError}</p>}
           <p className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-900">Project: <strong>{selectedProject?.name}</strong></p>
           <Field label="Job Name" required><input name="name" autoFocus required maxLength={100} placeholder="e.g., Baseline_Calibration" className={inputClass} /></Field>
           <Field label="Description (optional)"><textarea name="description" rows={3} maxLength={500} placeholder="Add a note about this experiment" className={`${inputClass} resize-y`} /></Field>
           <Field label="Copy from Existing Job (optional)"><select name="copyFromJobId" defaultValue="" className={inputClass}><option value="">None (start from scratch)</option>{projectJobs.map((job) => <option key={job.id} value={job.id}>{job.name} ({job.id})</option>)}</select></Field>
           <Field label="Workflow"><input readOnly value="RAT (Reservoir Assessment Tool) + VIC Calibration" className={`${inputClass} bg-slate-50 text-slate-600`} /></Field>
-          <p className="text-xs leading-5 text-slate-500">A copied job starts with copied settings and a separate execution history and results.</p>
-          <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" onClick={() => setDialog(null)} className={secondaryButton}>Cancel</button><button type="submit" className={primaryButton}>Create Job <span aria-hidden="true">→</span></button></div>
+          <p className="text-xs leading-5 text-slate-500">The new job gets its own ID and no copied results. Calibration settings are not stored by this backend yet.</p>
+          <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" onClick={() => setDialog(null)} className={secondaryButton}>Cancel</button><button type="submit" disabled={saving} className={primaryButton}>{saving ? "Creating…" : "Create Job"} <span aria-hidden="true">→</span></button></div>
         </form>
       </Modal>}
 

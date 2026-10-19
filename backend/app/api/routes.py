@@ -74,6 +74,18 @@ def create_job(project_id: str, payload: JobCreate, db: Session = Depends(get_se
     return job
 
 
+@router.put("/api/projects/{project_id}", response_model=ProjectRead, tags=["projects"])
+def update_project(project_id: str, payload: ProjectCreate, db: Session = Depends(get_session)) -> Project:
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+    project.name = payload.name
+    project.description = payload.description
+    project.modified_at = utc_now()
+    db.commit()
+    db.refresh(project)
+    return project
+
 @router.get("/api/projects/{project_id}/jobs", response_model=list[JobRead], tags=["jobs"])
 def list_jobs(project_id: str, db: Session = Depends(get_session)) -> list[Job]:
     if db.get(Project, project_id) is None:

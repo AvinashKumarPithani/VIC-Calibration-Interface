@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Navigate, NavLink, Route, Routes } from "react-router-dom";
 import SetupPage from "./features/setup/SetupPage";
 import InputsPage from "./features/inputs/InputsPage";
-import { initialJobs, initialProjects } from "./features/setup/mockData";
+import { api, type ApiJob, type ApiProject } from "./lib/api";
 import type { CalibrationJob, JobDraft, Project, ProjectDraft } from "./features/setup/types";
 
 const tabs = [
@@ -30,80 +30,78 @@ function PlaceholderPage({ title, step }: { title: string; step: string }) {
   );
 }
 
-function newId(prefix: string) {
-  const suffix = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  return `${prefix}-${suffix}`;
+function mapProject(record: ApiProject): Project {
+  return { id: record.id, name: record.name, description: record.description ?? "", createdAt: record.created_at, modifiedAt: record.modified_at };
+}
+
+function mapJob(record: ApiJob): CalibrationJob {
+  return { id: record.id, projectId: record.project_id, name: record.name, description: record.description ?? "", createdAt: record.created_at, modifiedAt: record.modified_at, status: "Not started", workflow: "RAT + VIC Calibration", settings: { workflow: "RAT + VIC Calibration" } };
 }
 
 export default function App() {
-  const [projects, setProjects] = useState<Project[]>(initialProjects);
-  const [jobs, setJobs] = useState<CalibrationJob[]>(initialJobs);
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(initialProjects[0]?.id ?? null);
-  const [selectedJobId, setSelectedJobId] = useState<string | null>(initialJobs[0]?.id ?? null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [jobs, setJobs] = useState<CalibrationJob[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [projectsLoading, setProjectsLoading] = useState(true);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
+  const [jobsLoading, setJobsLoading] = useState(false);
+  const [jobsError, setJobsError] = useState<string | null>(null);
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
   const selectedJob = jobs.find((job) => job.id === selectedJobId && job.projectId === selectedProjectId) ?? null;
 
-  function createProject(draft: ProjectDraft) {
-    const now = new Date().toISOString();
-    const project: Project = { id: newId("project"), ...draft, createdAt: now, modifiedAt: now };
-    setProjects((current) => [project, ...current]);
-    setSelectedProjectId(project.id);
-    setSelectedJobId(null);
+  useEffect(() => {
+    let active = true;
+    api.listProjects().then((rows) => {
+      if (!active) return;
+      const loaded = rows.map(mapProject);
+      setProjects(loaded);
+      setSelectedProjectId(loaded[0]?.id ?? null);
+    }).catch((error: unknown) => {
+      if (active) setProjectsError(error instanceof Error ? error.message : "Projects could not be loaded.");
+    }).finally(() => { if (active) setProjectsLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!selectedProjectId) { setJobs([]); setSelectedJobId(null); setJobsLoading(false); setJobsError(null); return; }
+    let active = true;
+    setJobsLoading(true); setJobsError(null); setJobs([]); setSelectedJobId(null);
+    api.listJobs(selectedProjectId).then((rows) => {
+      if (!active) return;
+      const loaded = rows.map(mapJob);
+      setJobs(loaded); setSelectedJobId(loaded[0]?.id ?? null);
+    }).catch((error: unknown) => {
+      if (active) setJobsError(error instanceof Error ? error.message : "Jobs could not be loaded.");
+    }).finally(() => { if (active) setJobsLoading(false); });
+    return () => { active = false; };
+  }, [selectedProjectId]);
+
+  async function createProject(draft: ProjectDraft) {
+    const project = mapProject(await api.createProject(draft));
+    setProjects((current) => [project, ...current]); setSelectedProjectId(project.id); setSelectedJobId(null);
     return project;
   }
 
-  function updateProject(projectId: string, draft: ProjectDraft) {
-    setProjects((current) => current.map((project) => project.id === projectId
-      ? { ...project, ...draft, modifiedAt: new Date().toISOString() }
-      : project));
+  async function updateProject(projectId: string, draft: ProjectDraft) {
+    const project = mapProject(await api.updateProject(projectId, draft));
+    setProjects((current) => current.map((item) => item.id === projectId ? project : item));
   }
 
-  function addJobToProject(projectId: string) {
-    const modifiedAt = new Date().toISOString();
-    setProjects((current) => current.map((project) => project.id === projectId ? { ...project, modifiedAt } : project));
-  }
-
-  function createJob(draft: JobDraft) {
-    if (!selectedProjectId) throw new Error("A project must be selected before creating a job.");
-    const sourceJob = jobs.find((job) => job.id === draft.copyFromJobId && job.projectId === selectedProjectId);
-    const now = new Date().toISOString();
-    const job: CalibrationJob = {
-      id: `JOB-${newId("new").slice(-12)}`,
-      projectId: selectedProjectId,
-      name: draft.name,
-      description: draft.description || sourceJob?.description || "",
-      createdAt: now,
-      modifiedAt: now,
-      status: "Not started",
-      workflow: "RAT + VIC Calibration",
-      settings: sourceJob ? { ...sourceJob.settings } : { workflow: "RAT + VIC Calibration" },
-      ...(sourceJob ? { copiedFromJobId: sourceJob.id } : {}),
-    };
-    setJobs((current) => [job, ...current]);
-    setSelectedJobId(job.id);
-    addJobToProject(selectedProjectId);
+  async function createJob(draft: JobDraft) {
+    if (!selectedProjectId) throw new Error("Select a project before creating a job.");
+    const source = jobs.find((job) => job.id === draft.copyFromJobId && job.projectId === selectedProjectId);
+    const job = mapJob(await api.createJob(selectedProjectId, { name: draft.name, description: draft.description || source?.description || "" }));
+    setJobs((current) => [job, ...current]); setSelectedJobId(job.id);
     return job;
   }
 
-  function duplicateJob(jobId: string) {
-    const source = jobs.find((job) => job.id === jobId);
+  async function duplicateJob(jobId: string) {
+    const source = jobs.find((job) => job.id === jobId && job.projectId === selectedProjectId);
     if (!source) throw new Error("The job to duplicate could not be found.");
-    const now = new Date().toISOString();
-    const duplicate: CalibrationJob = {
-      ...source,
-      id: `JOB-${newId("copy").slice(-12)}`,
-      name: `${source.name} copy`,
-      createdAt: now,
-      modifiedAt: now,
-      status: "Not started",
-      settings: { ...source.settings },
-      result: undefined,
-      copiedFromJobId: source.id,
-    };
-    setJobs((current) => [duplicate, ...current]);
-    setSelectedJobId(duplicate.id);
-    addJobToProject(source.projectId);
-    return duplicate;
+    const copy = mapJob(await api.createJob(source.projectId, { name: `${source.name} copy`, description: source.description }));
+    setJobs((current) => [copy, ...current]); setSelectedJobId(copy.id);
+    return copy;
   }
 
   return (
@@ -154,6 +152,10 @@ export default function App() {
               onCreateJob={createJob}
               onDuplicateJob={duplicateJob}
               onSelectJob={setSelectedJobId}
+              projectsLoading={projectsLoading}
+              projectsError={projectsError}
+              jobsLoading={jobsLoading}
+              jobsError={jobsError}
             />
           } />
           <Route path="/inputs" element={<InputsPage project={selectedProject} job={selectedJob} />} />
