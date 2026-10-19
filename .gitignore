@@ -4,3 +4,11 @@ dist/
 .env
 .env.*
 !.env.example
+# Local FastAPI data, environments, and Python test artifacts
+backend/.venv/
+backend/storage/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.coverage
+htmlcov/
