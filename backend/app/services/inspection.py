@@ -27,6 +27,7 @@ from app.schemas.inspection import (
     YamlNode,
     YamlTreeRepresentation,
 )
+from app.services.uploads import RAT_CONFIGURATION_FILENAMES
 
 
 class UniqueKeySafeLoader(yaml.SafeLoader):
@@ -133,7 +134,7 @@ def inspect_upload_content(upload: Upload, content: bytes) -> UploadInspectionRe
 
 
 def _format_from_filename(filename: str) -> str | None:
-    if filename in {"rat_config.yaml", "rat_config.yml", "rat_config_template.yml", "rat_config_template.yaml"}:
+    if filename in RAT_CONFIGURATION_FILENAMES:
         return "rat_yaml"
     if filename == "vic_params.txt":
         return "vic_global_text"

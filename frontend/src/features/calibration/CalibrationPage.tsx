@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import type { CalibrationJob, Project } from "../setup/types";
 import { api, type InspectedYamlNode, type UploadInspection, type UploadMetadata } from "../../lib/api";
+import { clearSavedInspectionUploadId, readSavedInspectionUploadId, saveInspectionUploadId } from "../../lib/inspectionState";
+import { notifyUploadInspectionFailed, notifyUploadInspected, UPLOAD_DELETED_EVENT, UPLOAD_INSPECTED_EVENT, type DeletedUploadContext } from "../../lib/uploadEvents";
 import InspectionViewer from "./components/InspectionViewer";
 
 interface CalibrationPageProps {
@@ -44,53 +46,6 @@ function recordSummary(inspection: UploadInspection): string | null {
 }
 
 const card = "rounded-xl border border-slate-200 bg-white shadow-sm";
-const selectedUploadStoragePrefix = "vic-calibration:tab3-selection:";
-
-interface StoredUploadSelection {
-  projectId: string;
-  jobId: string;
-  uploadId: string;
-}
-
-function selectionStorageKey(projectId: string, jobId: string): string {
-  return `${selectedUploadStoragePrefix}${encodeURIComponent(projectId)}:${encodeURIComponent(jobId)}`;
-}
-
-function readSavedUploadId(projectId: string, jobId: string): string | null {
-  const key = selectionStorageKey(projectId, jobId);
-  try {
-    const saved = sessionStorage.getItem(key);
-    if (!saved) return null;
-    const value: unknown = JSON.parse(saved);
-    if (typeof value === "object" && value !== null
-      && "projectId" in value && value.projectId === projectId
-      && "jobId" in value && value.jobId === jobId
-      && "uploadId" in value && typeof value.uploadId === "string" && value.uploadId.length > 0) {
-      return value.uploadId;
-    }
-    sessionStorage.removeItem(key);
-  } catch {
-    // Storage may be disabled or inaccessible; selection restoration is optional.
-  }
-  return null;
-}
-
-function saveUploadId(projectId: string, jobId: string, uploadId: string): void {
-  const selection: StoredUploadSelection = { projectId, jobId, uploadId };
-  try {
-    sessionStorage.setItem(selectionStorageKey(projectId, jobId), JSON.stringify(selection));
-  } catch {
-    // Keep the page usable when browser storage is unavailable.
-  }
-}
-
-function clearSavedUploadId(projectId: string, jobId: string): void {
-  try {
-    sessionStorage.removeItem(selectionStorageKey(projectId, jobId));
-  } catch {
-    // Ignore inaccessible storage.
-  }
-}
 
 function preferredUpload(uploads: UploadMetadata[]): UploadMetadata | null {
   const supportedNames = new Set([
@@ -105,6 +60,8 @@ function preferredUpload(uploads: UploadMetadata[]): UploadMetadata | null {
 
 export default function CalibrationPage({ project, job, isActive }: CalibrationPageProps) {
   const [uploads, setUploads] = useState<UploadMetadata[]>([]);
+  const uploadsRef = useRef<UploadMetadata[]>(uploads);
+  uploadsRef.current = uploads;
   const [uploadsLoading, setUploadsLoading] = useState(false);
   const [uploadsError, setUploadsError] = useState<string | null>(null);
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
@@ -129,8 +86,9 @@ export default function CalibrationPage({ project, job, isActive }: CalibrationP
         && contextRef.current.projectId === projectId
         && contextRef.current.jobId === jobId) {
         setUploads(records);
+        uploadsRef.current = records;
         const currentId = selectedUploadRef.current;
-        const savedId = readSavedUploadId(projectId, jobId);
+        const savedId = readSavedInspectionUploadId(projectId, jobId);
         const validCurrentId = currentId && records.some((upload) => upload.id === currentId) ? currentId : null;
         const validSavedId = savedId && records.some((upload) => upload.id === savedId) ? savedId : null;
         const nextUpload = records.find((upload) => upload.id === (validCurrentId ?? validSavedId))
@@ -147,7 +105,6 @@ export default function CalibrationPage({ project, job, isActive }: CalibrationP
         }
         if (nextId) {
           selectedUploadRef.current = nextId;
-          saveUploadId(projectId, jobId, nextId);
           if (selectedUploadId !== nextId) setSelectedUploadId(nextId);
         } else {
           selectedUploadRef.current = null;
@@ -155,7 +112,7 @@ export default function CalibrationPage({ project, job, isActive }: CalibrationP
           setInspection(null);
           setInspectionLoading(false);
           setInspectionError(null);
-          clearSavedUploadId(projectId, jobId);
+          clearSavedInspectionUploadId(projectId, jobId);
         }
       }
     } catch (error) {
@@ -210,6 +167,46 @@ export default function CalibrationPage({ project, job, isActive }: CalibrationP
   }, [isActive]);
 
   useEffect(() => {
+    function handleUploadDeleted(event: Event) {
+      const detail = (event as CustomEvent<DeletedUploadContext>).detail;
+      if (!detail || contextRef.current.projectId !== detail.projectId || contextRef.current.jobId !== detail.jobId) return;
+      setUploads((current) => {
+        const next = current.filter((upload) => upload.id !== detail.uploadId);
+        uploadsRef.current = next;
+        return next;
+      });
+      if (selectedUploadRef.current !== detail.uploadId) return;
+      requestId.current += 1;
+      selectedUploadRef.current = null;
+      setSelectedUploadId(null);
+      setInspection(null);
+      setInspectionLoading(false);
+      setInspectionError(null);
+      clearSavedInspectionUploadId(detail.projectId, detail.jobId, detail.uploadId);
+    }
+    window.addEventListener(UPLOAD_DELETED_EVENT, handleUploadDeleted);
+    function handleUploadInspected(event: Event) {
+      const result = (event as CustomEvent<UploadInspection>).detail;
+      if (!result
+        || contextRef.current.projectId !== result.upload.project_id
+        || contextRef.current.jobId !== result.upload.job_id
+        || !uploadsRef.current.some((upload) => upload.id === result.upload.id)) return;
+      requestId.current += 1;
+      selectedUploadRef.current = result.upload.id;
+      setSelectedUploadId(result.upload.id);
+      setInspection(result);
+      setInspectionLoading(false);
+      setInspectionError(null);
+      saveInspectionUploadId(result.upload.project_id, result.upload.job_id, result.upload.id);
+    }
+    window.addEventListener(UPLOAD_INSPECTED_EVENT, handleUploadInspected);
+    return () => {
+      window.removeEventListener(UPLOAD_DELETED_EVENT, handleUploadDeleted);
+      window.removeEventListener(UPLOAD_INSPECTED_EVENT, handleUploadInspected);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!isActive || !selectedUploadId || inspection || inspectionLoading || uploadsLoading || inspectionError) return;
     const selected = uploads.find((upload) => upload.id === selectedUploadId);
     if (selected) void selectUpload(selected);
@@ -226,7 +223,6 @@ export default function CalibrationPage({ project, job, isActive }: CalibrationP
     const jobId = job.id;
     const currentRequest = ++requestId.current;
     selectedUploadRef.current = upload.id;
-    saveUploadId(projectId, jobId, upload.id);
     setSelectedUploadId(upload.id);
     setInspection(null);
     setInspectionError(null);
@@ -242,13 +238,17 @@ export default function CalibrationPage({ project, job, isActive }: CalibrationP
         && contextRef.current.projectId === projectId
         && contextRef.current.jobId === jobId) {
         setInspection(result);
+        saveInspectionUploadId(projectId, jobId, upload.id);
+        notifyUploadInspected(result);
       }
     } catch (error) {
       if (requestId.current === currentRequest
         && selectedUploadRef.current === upload.id
         && contextRef.current.projectId === projectId
         && contextRef.current.jobId === jobId) {
-        setInspectionError(error instanceof Error ? error.message : "This file could not be inspected.");
+        const message = error instanceof Error ? error.message : "This file could not be inspected.";
+        setInspectionError(message);
+        notifyUploadInspectionFailed({ projectId, jobId, uploadId: upload.id, message });
       }
     } finally {
       if (requestId.current === currentRequest) setInspectionLoading(false);

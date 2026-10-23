@@ -3,10 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Index, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
+from app.services.uploads import RAT_CONFIGURATION_FILENAMES
 
 
 def utc_now() -> datetime:
@@ -49,6 +50,16 @@ class Upload(Base):
             ondelete="CASCADE",
             name="fk_uploads_job_project",
         ),
+        Index(
+            "uq_uploads_one_rat_configuration_per_job",
+            "project_id",
+            "job_id",
+            unique=True,
+            sqlite_where=text(
+                "lower(original_filename) IN "
+                "('rat_config.yaml', 'rat_config.yml', 'rat_config_template.yaml', 'rat_config_template.yml')"
+            ),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
@@ -60,3 +71,9 @@ class Upload(Base):
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     job: Mapped[Job] = relationship(back_populates="uploads")
+
+
+RAT_CONFIGURATION_UNIQUE_INDEX = next(
+    index for index in Upload.__table__.indexes
+    if index.name == "uq_uploads_one_rat_configuration_per_job"
+)

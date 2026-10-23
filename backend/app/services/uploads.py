@@ -6,7 +6,12 @@ from uuid import uuid4
 from fastapi import UploadFile
 
 ALLOWED_FILE_EXTENSIONS = frozenset({".yaml", ".yml", ".json", ".txt", ".csv", ".zip"})
+RAT_CONFIGURATION_FILENAMES = frozenset({"rat_config.yaml", "rat_config.yml", "rat_config_template.yaml", "rat_config_template.yml"})
 CHUNK_SIZE_BYTES = 64 * 1024
+
+
+def is_rat_configuration_filename(filename: str) -> bool:
+    return filename.lower() in RAT_CONFIGURATION_FILENAMES
 
 
 class InvalidUploadName(Exception):

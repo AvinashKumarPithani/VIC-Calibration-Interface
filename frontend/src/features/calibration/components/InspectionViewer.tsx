@@ -68,25 +68,99 @@ function YamlTreeView({ root }: { root: InspectedYamlNode }) {
   );
 }
 
-function VicLinesView({ lines }: { lines: Extract<UploadInspectionRepresentation, { kind: "vic_parameter_lines" }>["lines"] }) {
+interface VicGroup {
+  title: string;
+  headingLine: number | null;
+  lines: Extract<UploadInspectionRepresentation, { kind: "vic_parameter_lines" }>["lines"];
+}
+
+type VicLine = Extract<UploadInspectionRepresentation, { kind: "vic_parameter_lines" }>["lines"][number];
+
+function commentHeading(line: VicLine, previousLine: VicLine | undefined): string | null {
+  if (line.kind !== "comment" || (previousLine && previousLine.kind !== "blank")) return null;
+  const heading = line.raw.replace(/^\s*#+\s?/, "").replace(/\s*#+\s*$/, "").trim();
+  if (!heading || heading.length > 48 || !/^[A-Za-z][A-Za-z -]*$/.test(heading)) return null;
+  const words = heading.split(/\s+/);
+  if (words.length > 5 || heading.includes("  ")) return null;
+  return heading;
+}
+
+function groupVicLines(lines: VicGroup["lines"]): VicGroup[] {
+  const groups: VicGroup[] = [];
+  let current: VicGroup = { title: "Before first section", headingLine: null, lines: [] };
+  let foundHeading = false;
+
+  lines.forEach((line, index) => {
+    const heading = commentHeading(line, lines[index - 1]);
+    if (heading !== null) {
+      if (current.lines.length > 0 || current.headingLine !== null) groups.push(current);
+      current = { title: heading, headingLine: line.line_number, lines: [] };
+      foundHeading = true;
+    } else {
+      current.lines.push(line);
+    }
+  });
+
+  if (current.lines.length > 0 || current.headingLine !== null) groups.push(current);
+  if (!foundHeading && groups.length === 1) groups[0].title = "VIC parameter file";
+  return groups;
+}
+
+function VicEntry({ line }: { line: VicLine }) {
+  if (line.kind === "blank") return null;
+  if (line.kind === "comment") {
+    return <div className="flex gap-2 px-3 py-1 text-slate-500"><span className="shrink-0 font-mono text-[10px] text-slate-400">{line.line_number}</span><code className="whitespace-pre-wrap break-words text-[11px]">{line.raw}</code></div>;
+  }
+
+  return (
+    <div className="grid grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)] items-start gap-3 px-3 py-1.5 sm:gap-4">
+      <div className="min-w-0">
+        <code className="block break-words text-xs font-semibold text-slate-800">{line.option}</code>
+        <span className="mt-0.5 block font-mono text-[10px] text-slate-400">Line {line.line_number}</span>
+      </div>
+      <code className="min-w-0 whitespace-pre-wrap break-words text-xs text-slate-700">{line.value_text ?? line.values.join(" ")}</code>
+    </div>
+  );
+}
+
+function VicLinesView({ lines }: { lines: VicGroup["lines"] }) {
+  const groups = groupVicLines(lines);
+  const [expandAll, setExpandAll] = useState(true);
+  const [showBlankLines, setShowBlankLines] = useState(false);
+  const [groupVersion, setGroupVersion] = useState(0);
+  function setGroupExpansion(expanded: boolean) {
+    setExpandAll(expanded);
+    setGroupVersion((version) => version + 1);
+  }
+
   if (lines.length === 0) return <p className="text-sm text-slate-500">No lines were returned.</p>;
   return (
-    <div className="overflow-x-auto rounded-lg border border-slate-200">
-      <table className="w-full min-w-[640px] text-left text-sm">
-        <thead className="sticky top-0 bg-slate-100 text-xs font-semibold uppercase tracking-wide text-slate-600">
-          <tr><th className="w-20 px-3 py-2">Line</th><th className="w-24 px-3 py-2">Kind</th><th className="px-3 py-2">Option</th><th className="px-3 py-2">Value text</th></tr>
-        </thead>
-        <tbody className="divide-y divide-slate-100">
-          {lines.map((line, index) => (
-            <tr key={`${line.line_number}-${index}`} className={line.kind === "comment" ? "bg-slate-50 text-slate-500" : "bg-white"}>
-              <td className="px-3 py-2 font-mono text-xs text-slate-500">{line.line_number}</td>
-              <td className="px-3 py-2 text-xs text-slate-500">{line.kind}</td>
-              <td className="px-3 py-2 font-mono text-xs text-slate-800">{line.option ?? (line.kind === "blank" ? "(blank)" : line.raw)}</td>
-              <td className="px-3 py-2 font-mono text-xs text-slate-700"><span className="whitespace-pre-wrap break-all">{line.value_text ?? (line.kind === "comment" ? line.raw : "")}</span></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div>
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-slate-500">
+          <input type="checkbox" checked={showBlankLines} onChange={(event) => setShowBlankLines(event.target.checked)} className="h-3 w-3 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
+          Show blank lines
+        </label>
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setGroupExpansion(true)} className="rounded-md px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-500">Expand all</button>
+          <button type="button" onClick={() => setGroupExpansion(false)} className="rounded-md px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-500">Collapse all</button>
+        </div>
+      </div>
+      <div key={groupVersion} className="space-y-2">
+        {groups.map((group, index) => {
+          const visibleLines = group.lines.filter((line) => line.kind !== "blank" || showBlankLines);
+          return (
+            <details key={`${group.headingLine ?? "leading"}-${index}`} open={expandAll} className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+              <summary className="cursor-pointer break-words bg-slate-50 px-3 py-2.5 text-sm font-semibold text-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-500">
+                {group.title}<span className="ml-2 text-xs font-normal text-slate-500">{group.headingLine !== null ? `Line ${group.headingLine}` : "Unsectioned lines"}</span>
+              </summary>
+              <div className="divide-y divide-slate-100 border-t border-slate-200">
+                {visibleLines.length === 0 ? <p className="px-3 py-2 text-xs italic text-slate-500">No parameter lines in this section.</p> : visibleLines.map((line, lineIndex) => <VicEntry key={`${line.line_number}-${lineIndex}`} line={line} />)}
+              </div>
+            </details>
+          );
+        })}
+      </div>
     </div>
   );
 }

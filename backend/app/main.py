@@ -7,13 +7,56 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, event
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import sessionmaker
 
 from app.api.routes import router
 from app.core.config import Settings
 from app.db import Base
 from app import models as _models  # noqa: F401 - registers ORM models with Base metadata.
+from app.models.records import RAT_CONFIGURATION_UNIQUE_INDEX
+from app.services.record_deletion import recover_staged_upload_deletions
+
+
+def install_sqlite_upload_filename_enforcement(engine: Engine) -> None:
+    """Install repeatable trigger enforcement without rewriting legacy upload rows."""
+    with engine.begin() as connection:
+        # Older versions may have created this index. It cannot coexist with legacy
+        # duplicate names, so replace it with an insert-time rule that preserves them.
+        connection.exec_driver_sql("DROP INDEX IF EXISTS uq_uploads_job_original_filename")
+        connection.exec_driver_sql(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_uploads_unique_job_filename_insert
+            BEFORE INSERT ON uploads
+            FOR EACH ROW
+            WHEN EXISTS (
+                SELECT 1 FROM uploads
+                WHERE project_id = NEW.project_id
+                  AND job_id = NEW.job_id
+                  AND original_filename = NEW.original_filename
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'duplicate upload filename for job');
+            END
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_uploads_unique_job_filename_update
+            BEFORE UPDATE OF project_id, job_id, original_filename ON uploads
+            FOR EACH ROW
+            WHEN EXISTS (
+                SELECT 1 FROM uploads
+                WHERE project_id = NEW.project_id
+                  AND job_id = NEW.job_id
+                  AND original_filename = NEW.original_filename
+                  AND id <> OLD.id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'duplicate upload filename for job');
+            END
+            """
+        )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -38,6 +81,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         app_settings.upload_dir.mkdir(parents=True, exist_ok=True)
         Base.metadata.create_all(bind=engine)
+        if engine.dialect.name == "sqlite":
+            RAT_CONFIGURATION_UNIQUE_INDEX.create(bind=engine, checkfirst=True)
+            install_sqlite_upload_filename_enforcement(engine)
+        recover_staged_upload_deletions(session_factory, app_settings.upload_dir)
         yield
         engine.dispose()
 

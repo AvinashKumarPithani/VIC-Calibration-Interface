@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import type { CalibrationJob, JobDraft, Project, ProjectDraft } from "./types";
 
@@ -12,6 +12,8 @@ interface SetupPageProps {
   onUpdateProject: (projectId: string, draft: ProjectDraft) => Promise<void>;
   onCreateJob: (draft: JobDraft) => Promise<CalibrationJob>;
   onDuplicateJob: (jobId: string) => Promise<CalibrationJob>;
+  onDeleteJob: (projectId: string, jobId: string) => Promise<void>;
+  onDeleteProject: (projectId: string) => Promise<void>;
   onSelectJob: (jobId: string) => void;
   projectsLoading: boolean;
   projectsError: string | null;
@@ -20,6 +22,10 @@ interface SetupPageProps {
 }
 
 type DialogState = "new-project" | "edit-project" | "new-job" | null;
+type PendingDeletion =
+  | { kind: "project"; id: string; name: string }
+  | { kind: "job"; id: string; projectId: string; name: string };
+type ToastMessage = { message: string; tone: "success" | "error" };
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat("en", { day: "numeric", month: "short", year: "numeric" }).format(
@@ -63,7 +69,7 @@ const secondaryButton = "inline-flex items-center justify-center gap-2 rounded-l
 
 export default function SetupPage({
   projects, jobs, selectedProjectId, selectedJobId, onSelectProject, onCreateProject,
-  onUpdateProject, onCreateJob, onDuplicateJob, onSelectJob, projectsLoading, projectsError, jobsLoading, jobsError,
+  onUpdateProject, onCreateJob, onDuplicateJob, onDeleteJob, onDeleteProject, onSelectJob, projectsLoading, projectsError, jobsLoading, jobsError,
 }: SetupPageProps) {
   const navigate = useNavigate();
   const [projectSearch, setProjectSearch] = useState("");
@@ -73,6 +79,24 @@ export default function SetupPage({
   const [feedback, setFeedback] = useState("");
   const [actionError, setActionError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [pendingDeletion, setPendingDeletion] = useState<PendingDeletion | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deletionError, setDeletionError] = useState("");
+  const [toast, setToast] = useState<ToastMessage | null>(null);
+  const toastTimer = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
+  }, []);
+
+  function showToast(message: string, tone: ToastMessage["tone"]) {
+    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
+    setToast({ message, tone });
+    toastTimer.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimer.current = null;
+    }, 3500);
+  }
 
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
   const projectJobs = jobs.filter((job) => job.projectId === selectedProjectId);
@@ -142,9 +166,31 @@ export default function SetupPage({
     setActionError("");
     try {
       const duplicate = await onDuplicateJob(job.id);
-      setFeedback(`${duplicate.name} created as a new job. No results were copied.`);
+      showToast(`${duplicate.name} created as a new job. No results were copied.`, "success");
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "Job could not be duplicated.");
+      showToast(error instanceof Error ? error.message : "Job could not be duplicated.", "error");
+    }
+  }
+
+  async function confirmDeletion() {
+    if (!pendingDeletion || deleting) return;
+    const target = pendingDeletion;
+    setDeleting(true);
+    setDeletionError("");
+    try {
+      if (target.kind === "job") {
+        await onDeleteJob(target.projectId, target.id);
+        setFeedback(`${target.name} and its uploaded inputs were deleted.`);
+      } else {
+        await onDeleteProject(target.id);
+        setFeedback(`${target.name} and its jobs were deleted.`);
+        setJobSearch("");
+      }
+      setPendingDeletion(null);
+    } catch (error) {
+      setDeletionError(error instanceof Error ? error.message : `${target.kind === "job" ? "Job" : "Project"} could not be deleted.`);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -169,18 +215,27 @@ export default function SetupPage({
               const isSelected = project.id === selectedProjectId;
               const count = project.id === selectedProjectId ? projectJobs.length : null;
               return (
+                <div key={project.id} className="flex items-stretch gap-1">
                 <button
-                  key={project.id}
                   type="button"
                   onClick={() => { onSelectProject(project.id); setJobSearch(""); setFeedback(""); }}
                   aria-current={isSelected ? "true" : undefined}
-                  className={`w-full rounded-lg border-l-[3px] p-3 text-left transition ${isSelected ? "border-blue-600 bg-blue-50 text-blue-950" : "border-transparent hover:bg-slate-50"}`}
+                  className={`min-w-0 flex-1 rounded-lg border-l-[3px] p-3 text-left transition ${isSelected ? "border-blue-600 bg-blue-50 text-blue-950" : "border-transparent hover:bg-slate-50"}`}
                 >
                   <span className="flex items-start gap-2.5"><Icon>{isSelected ? "▤" : "▧"}</Icon><span className="min-w-0">
                     <span className="block truncate text-sm font-semibold">{project.name}</span>
                     <span className="mt-1 block text-xs text-slate-500">{count === null ? "Select to load jobs" : `${count} ${count === 1 ? "job" : "jobs"}`} · Updated {formatDate(project.modifiedAt)}</span>
                   </span></span>
                 </button>
+                <button
+                  type="button"
+                  aria-label={`Delete project ${project.name}`}
+                  title={`Delete ${project.name}`}
+                  disabled={deleting}
+                  onClick={() => { setDeletionError(""); setPendingDeletion({ kind: "project", id: project.id, name: project.name }); }}
+                  className="shrink-0 self-center rounded-md px-2 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-rose-500 disabled:opacity-50"
+                >Delete</button>
+                </div>
               );
             })}
             {projectsLoading && <p className="px-3 py-4 text-sm text-slate-500">Loading projects…</p>}
@@ -217,15 +272,15 @@ export default function SetupPage({
                   <h2 className="flex items-center gap-2 text-base font-semibold text-slate-900"><Icon>▱</Icon>A. Project Information</h2>
                   <button type="button" onClick={() => setDialog("edit-project")} className={`${secondaryButton} text-blue-700`}><Icon>✎</Icon><span>Edit Project</span></button>
                 </div>
-                <div className="grid gap-2">
+                <div className="grid gap-2 sm:grid-cols-[minmax(0,2fr)_minmax(150px,1fr)] sm:items-stretch">
                   <div className="space-y-1.5">
-                    <div><h3 className="text-xs font-semibold text-slate-600">Project Name</h3><p className="mt-0.5 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-medium text-slate-900">{selectedProject.name}</p></div>
-                    <div><h3 className="text-xs font-semibold text-slate-600">Description</h3><p className="mt-0.5 min-h-0 whitespace-pre-wrap rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs leading-4 text-slate-700">{selectedProject.description || <span className="italic text-slate-400">No description provided.</span>}</p></div>
+                    <div><h3 className="text-xs font-semibold text-slate-600">Project Name</h3><p className="mt-0.5 break-words rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-medium text-slate-900">{selectedProject.name}</p></div>
+                    <div><h3 className="text-xs font-semibold text-slate-600">Description</h3><p className="mt-0.5 min-h-0 whitespace-pre-wrap break-words rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs leading-4 text-slate-700">{selectedProject.description || <span className="italic text-slate-400">No description provided.</span>}</p></div>
                   </div>
-                  <dl className="grid grid-cols-2 gap-x-2 gap-y-2 rounded-lg bg-slate-50 p-2 text-xs">
-                    <div><dt className="text-xs font-medium text-slate-500">Created On</dt><dd className="mt-0.5 text-slate-800">{formatDate(selectedProject.createdAt)}</dd></div>
-                    <div><dt className="text-xs font-medium text-slate-500">Last Modified</dt><dd className="mt-0.5 text-slate-800">{formatDate(selectedProject.modifiedAt)}</dd></div>
-                    <div><dt className="text-xs font-medium text-slate-500">Total Jobs</dt><dd className="mt-1 font-semibold text-slate-900">{projectJobs.length}</dd></div>
+                  <dl className="grid grid-cols-3 gap-x-2 gap-y-1 rounded-lg bg-slate-50 p-2 text-xs sm:grid-cols-1 sm:content-center sm:gap-y-2">
+                    <div className="min-w-0"><dt className="font-medium text-slate-500">Created On</dt><dd className="mt-0.5 break-words text-slate-800">{formatDate(selectedProject.createdAt)}</dd></div>
+                    <div className="min-w-0"><dt className="font-medium text-slate-500">Last Modified</dt><dd className="mt-0.5 break-words text-slate-800">{formatDate(selectedProject.modifiedAt)}</dd></div>
+                    <div className="min-w-0"><dt className="font-medium text-slate-500">Total Jobs</dt><dd className="mt-0.5 font-semibold text-slate-900">{projectJobs.length}</dd></div>
                   </dl>
                 </div>
               </section>
@@ -240,13 +295,13 @@ export default function SetupPage({
                   <input value={jobSearch} onChange={(event) => setJobSearch(event.target.value)} placeholder="Search jobs…" className={`${inputClass} pl-9`} />
                 </label>
                 <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-slate-200">
-                  <table className="w-full min-w-[680px] border-collapse text-left text-[11px]">
+                  <table className="w-full min-w-[760px] border-collapse text-left text-[11px]">
                     <thead className="bg-slate-50 text-xs font-semibold text-slate-700"><tr>
-                      <th className="px-2 py-1.5">Job ID</th><th className="px-2 py-1.5">Job Name</th><th className="px-2 py-1.5">Created On</th><th className="px-2 py-1.5">Last Modified</th><th className="px-2 py-1.5">Status</th><th className="px-2 py-1.5">Best NSE</th><th className="px-2 py-1.5">Actions</th>
+                      <th className="w-[17%] px-2 py-1.5">Job ID</th><th className="w-[19%] px-2 py-1.5">Job Name</th><th className="w-[12%] px-2 py-1.5">Created On</th><th className="w-[14%] px-2 py-1.5">Last Modified</th><th className="w-[10%] px-2 py-1.5">Status</th><th className="w-[28%] px-2 py-1.5 text-right">Actions</th>
                     </tr></thead>
                     <tbody className="divide-y divide-slate-100">
-                      {jobsLoading && <tr><td colSpan={7} className="px-4 py-8 text-center text-slate-500">Loading jobs…</td></tr>}
-                      {jobsError && <tr><td colSpan={7} role="alert" className="px-4 py-8 text-center text-rose-700">{jobsError}</td></tr>}
+                      {jobsLoading && <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-500">Loading jobs…</td></tr>}
+                      {jobsError && <tr><td colSpan={6} role="alert" className="px-4 py-8 text-center text-rose-700">{jobsError}</td></tr>}
                       {!jobsLoading && !jobsError && visibleJobs.map((job) => (
                         <tr key={job.id} className={job.id === selectedJobId ? "bg-sky-50/60" : "bg-white hover:bg-slate-50/70"}>
                           <td className="whitespace-nowrap px-2 py-1.5 font-medium text-slate-600">{job.id}</td>
@@ -254,15 +309,30 @@ export default function SetupPage({
                           <td className="whitespace-nowrap px-2 py-1.5 text-slate-600">{formatDate(job.createdAt)}</td>
                           <td className="whitespace-nowrap px-2 py-1.5 text-slate-600">{formatDate(job.modifiedAt)}</td>
                           <td className="whitespace-nowrap px-2 py-1.5"><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${job.status === "Completed" ? "bg-emerald-50 text-emerald-800" : job.status === "Ready" ? "bg-blue-50 text-blue-800" : "bg-slate-100 text-slate-700"}`}>{job.status}</span></td>
-                          <td className="whitespace-nowrap px-2 py-1.5 text-slate-700">{job.result?.bestNse !== undefined ? <span title="Illustrative mock result">{job.result.bestNse.toFixed(2)} <span className="text-[10px] text-slate-400">mock</span></span> : <span className="text-slate-400">—</span>}</td>
-                          <td className="whitespace-nowrap px-2 py-1"><div className="flex items-center gap-1">
-                            <button type="button" onClick={() => openJob(job)} className="rounded-md px-1.5 py-1 text-[11px] font-semibold text-blue-700 hover:bg-blue-50" title="Open job">Open</button>
-                            <button type="button" onClick={() => setResultJob(job)} className="rounded-md px-1.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100" title="View available mock results">Results</button>
-                            <button type="button" onClick={() => duplicateJob(job)} className="rounded-md px-1.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100" title="Duplicate job">Copy</button>
-                          </div></td>
+                          <td className="px-2 py-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex min-w-0 items-center gap-1">
+                                <button type="button" onClick={() => openJob(job)} className="rounded-md px-1.5 py-1 text-[11px] font-semibold text-blue-700 hover:bg-blue-50" title="Open job">Open</button>
+                                <button type="button" onClick={() => setResultJob(job)} className="rounded-md px-1.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100" title="View available mock results">Results</button>
+                                <button type="button" onClick={() => duplicateJob(job)} className="rounded-md px-1.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100" title="Duplicate job">Copy</button>
+                              </div>
+                              <button
+                                type="button"
+                                disabled={deleting}
+                                onClick={() => { setDeletionError(""); setPendingDeletion({ kind: "job", id: job.id, projectId: job.projectId, name: job.name }); }}
+                                aria-label={`Delete job ${job.name}`}
+                                title="Delete job"
+                                className="ml-1 shrink-0 rounded-md border-l border-slate-200 pl-2 pr-1.5 py-1.5 text-rose-700 hover:bg-rose-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-rose-500 disabled:opacity-50"
+                              >
+                                <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="size-4">
+                                  <path d="M3 6h18M8 6V4h8v2m-11 0 1 14h12l1-14M10 11v5m4-5v5" />
+                                </svg>
+                              </button>
+                            </div>
+                          </td>
                         </tr>
                       ))}
-                      {!jobsLoading && !jobsError && visibleJobs.length === 0 && <tr><td colSpan={7} className="px-4 py-10 text-center"><p className="font-medium text-slate-700">{projectJobs.length === 0 ? "No jobs in this project yet" : "No jobs match your search"}</p><p className="mt-1 text-sm text-slate-500">{projectJobs.length === 0 ? "Create a calibration job to get started." : "Try a different job name, ID, or status."}</p></td></tr>}
+                      {!jobsLoading && !jobsError && visibleJobs.length === 0 && <tr><td colSpan={6} className="px-4 py-10 text-center"><p className="font-medium text-slate-700">{projectJobs.length === 0 ? "No jobs in this project yet" : "No jobs match your search"}</p><p className="mt-1 text-sm text-slate-500">{projectJobs.length === 0 ? "Create a calibration job to get started." : "Try a different job name, ID, or status."}</p></td></tr>}
                     </tbody>
                   </table>
                 </div>
@@ -339,6 +409,33 @@ export default function SetupPage({
       {resultJob && <Modal title={`Results: ${resultJob.name}`} onClose={() => setResultJob(null)}>
         {resultJob.result ? <div className="space-y-4"><p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">Illustrative mock result — this is sample interface data, not a scientific model result.</p><dl className="grid grid-cols-2 gap-3 rounded-lg bg-slate-50 p-4 text-sm"><div><dt className="text-slate-500">Job ID</dt><dd className="mt-1 font-medium text-slate-900">{resultJob.id}</dd></div><div><dt className="text-slate-500">Status</dt><dd className="mt-1 font-medium text-slate-900">{resultJob.status}</dd></div><div><dt className="text-slate-500">Best NSE (mock)</dt><dd className="mt-1 font-semibold text-slate-900">{resultJob.result.bestNse?.toFixed(2) ?? "Unavailable"}</dd></div></dl></div> : <div className="rounded-lg border border-dashed border-slate-300 px-5 py-8 text-center"><p className="font-medium text-slate-800">No results available</p><p className="mt-1 text-sm text-slate-500">This job has no result data in the current prototype.</p></div>}
         <div className="mt-5 flex justify-end"><button type="button" onClick={() => setResultJob(null)} className={secondaryButton}>Close</button></div>
+      </Modal>}
+
+      {toast && <div
+        role={toast.tone === "error" ? "alert" : "status"}
+        aria-live={toast.tone === "error" ? "assertive" : "polite"}
+        className={`pointer-events-none fixed bottom-5 right-5 z-[60] max-w-sm rounded-xl border px-4 py-3 text-sm font-medium shadow-lg ${toast.tone === "success" ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-rose-200 bg-rose-50 text-rose-900"}`}
+      >
+        {toast.message}
+      </div>}
+
+      {pendingDeletion && <Modal
+        title={pendingDeletion.kind === "job" ? "Delete Calibration Job?" : "Delete Project?"}
+        onClose={() => { if (!deleting) { setPendingDeletion(null); setDeletionError(""); } }}
+      >
+        {deletionError && <p role="alert" className="mb-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-800">{deletionError}</p>}
+        <p className="text-sm text-slate-700">
+          Delete <strong className="text-slate-900">{pendingDeletion.name}</strong>?
+        </p>
+        {pendingDeletion.kind === "job" ? (
+          <p className="mt-2 text-sm leading-5 text-slate-600">This removes the job and its uploaded input files. Inspection results are calculated on demand and are not stored as separate backend records.</p>
+        ) : (
+          <p className="mt-2 text-sm leading-5 text-slate-600">This removes the project, all its jobs, and their uploaded input files. Inspection results are calculated on demand and are not stored as separate backend records.</p>
+        )}
+        <div className="mt-5 flex justify-end gap-2 border-t border-slate-100 pt-4">
+          <button type="button" disabled={deleting} onClick={() => { setPendingDeletion(null); setDeletionError(""); }} className={secondaryButton}>Cancel</button>
+          <button type="button" disabled={deleting} onClick={() => void confirmDeletion()} className="inline-flex items-center justify-center rounded-lg bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-rose-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-600 disabled:cursor-wait disabled:opacity-50">{deleting ? "Deleting…" : "Delete"}</button>
+        </div>
       </Modal>}
     </div>
   );

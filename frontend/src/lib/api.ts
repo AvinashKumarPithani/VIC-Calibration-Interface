@@ -111,11 +111,18 @@ export const api = {
     method: "PUT",
     body: JSON.stringify(payload),
   }),
+  deleteProject: (projectId: string) => request<void>(`/api/projects/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
+  }),
   listJobs: (projectId: string) => request<ApiJob[]>(`/api/projects/${encodeURIComponent(projectId)}/jobs`),
   createJob: (projectId: string, payload: RecordPayload) => request<ApiJob>(`/api/projects/${encodeURIComponent(projectId)}/jobs`, {
     method: "POST",
     body: JSON.stringify(payload),
   }),
+  deleteJob: (projectId: string, jobId: string) => request<void>(
+    `/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}`,
+    { method: "DELETE" },
+  ),
   listUploads: (projectId: string, jobId: string) => request<UploadMetadata[]>(
     `/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/uploads`,
   ),

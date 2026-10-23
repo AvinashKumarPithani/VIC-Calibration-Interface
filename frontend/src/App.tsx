@@ -4,6 +4,7 @@ import SetupPage from "./features/setup/SetupPage";
 import InputsPage from "./features/inputs/InputsPage";
 import CalibrationPage from "./features/calibration/CalibrationPage";
 import { api, type ApiJob, type ApiProject } from "./lib/api";
+import { clearSavedInspectionState } from "./lib/inspectionState";
 import type { CalibrationJob, JobDraft, Project, ProjectDraft } from "./features/setup/types";
 
 const tabs = [
@@ -39,9 +40,52 @@ function mapJob(record: ApiJob): CalibrationJob {
   return { id: record.id, projectId: record.project_id, name: record.name, description: record.description ?? "", createdAt: record.created_at, modifiedAt: record.modified_at, status: "Not started", workflow: "RAT + VIC Calibration", settings: { workflow: "RAT + VIC Calibration" } };
 }
 
+const activeSelectionStorageKey = "vic-calibration:active-project-job";
+
+interface SavedProjectJobSelection {
+  projectId: string;
+  jobId: string;
+}
+
+function readProjectJobSelection(): SavedProjectJobSelection | null {
+  try {
+    const stored = sessionStorage.getItem(activeSelectionStorageKey);
+    if (!stored) return null;
+    const value: unknown = JSON.parse(stored);
+    if (typeof value === "object" && value !== null
+      && "projectId" in value && typeof value.projectId === "string"
+      && "jobId" in value && typeof value.jobId === "string") {
+      return { projectId: value.projectId, jobId: value.jobId };
+    }
+    sessionStorage.removeItem(activeSelectionStorageKey);
+  } catch {
+    // Browser storage may be disabled or unavailable.
+  }
+  return null;
+}
+
+function saveProjectJobSelection(selection: SavedProjectJobSelection): void {
+  try {
+    sessionStorage.setItem(activeSelectionStorageKey, JSON.stringify(selection));
+  } catch {
+    // Keep project/job selection usable even if browser storage is unavailable.
+  }
+}
+
+function clearProjectJobSelection(projectId?: string, jobId?: string): void {
+  const saved = readProjectJobSelection();
+  if (!saved || (projectId && saved.projectId !== projectId) || (jobId && saved.jobId !== jobId)) return;
+  try {
+    sessionStorage.removeItem(activeSelectionStorageKey);
+  } catch {
+    // Ignore inaccessible storage.
+  }
+}
+
 export default function App() {
   const location = useLocation();
   const parametersActive = location.pathname === "/parameters";
+  const inputsActive = location.pathname === "/inputs";
   const [projects, setProjects] = useState<Project[]>([]);
   const [jobs, setJobs] = useState<CalibrationJob[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -59,7 +103,10 @@ export default function App() {
       if (!active) return;
       const loaded = rows.map(mapProject);
       setProjects(loaded);
-      setSelectedProjectId(loaded[0]?.id ?? null);
+      const saved = readProjectJobSelection();
+      const selected = loaded.find((project) => project.id === saved?.projectId) ?? loaded[0] ?? null;
+      setSelectedProjectId(selected?.id ?? null);
+      if (!selected) clearProjectJobSelection();
     }).catch((error: unknown) => {
       if (active) setProjectsError(error instanceof Error ? error.message : "Projects could not be loaded.");
     }).finally(() => { if (active) setProjectsLoading(false); });
@@ -73,12 +120,23 @@ export default function App() {
     api.listJobs(selectedProjectId).then((rows) => {
       if (!active) return;
       const loaded = rows.map(mapJob);
-      setJobs(loaded); setSelectedJobId(loaded[0]?.id ?? null);
+      const saved = readProjectJobSelection();
+      const selected = (saved?.projectId === selectedProjectId ? loaded.find((job) => job.id === saved.jobId && job.projectId === selectedProjectId) : undefined)
+        ?? loaded[0]
+        ?? null;
+      setJobs(loaded); setSelectedJobId(selected?.id ?? null);
+      if (!selected) clearProjectJobSelection(selectedProjectId);
     }).catch((error: unknown) => {
       if (active) setJobsError(error instanceof Error ? error.message : "Jobs could not be loaded.");
     }).finally(() => { if (active) setJobsLoading(false); });
     return () => { active = false; };
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (selectedProject && selectedJob && selectedJob.projectId === selectedProject.id) {
+      saveProjectJobSelection({ projectId: selectedProject.id, jobId: selectedJob.id });
+    }
+  }, [selectedProjectId, selectedJobId]);
 
   async function createProject(draft: ProjectDraft) {
     const project = mapProject(await api.createProject(draft));
@@ -105,6 +163,30 @@ export default function App() {
     const copy = mapJob(await api.createJob(source.projectId, { name: `${source.name} copy`, description: source.description }));
     setJobs((current) => [copy, ...current]); setSelectedJobId(copy.id);
     return copy;
+  }
+
+  async function deleteJob(projectId: string, jobId: string) {
+    await api.deleteJob(projectId, jobId);
+    clearProjectJobSelection(projectId, jobId);
+    clearSavedInspectionState(projectId, jobId);
+    if (selectedProjectId !== projectId) return;
+    const remainingJobs = jobs.filter((job) => job.id !== jobId && job.projectId === projectId);
+    setJobs(remainingJobs);
+    if (selectedJobId === jobId) setSelectedJobId(remainingJobs[0]?.id ?? null);
+  }
+
+  async function deleteProject(projectId: string) {
+    await api.deleteProject(projectId);
+    clearProjectJobSelection(projectId);
+    clearSavedInspectionState(projectId);
+    const remainingProjects = projects.filter((project) => project.id !== projectId);
+    setProjects(remainingProjects);
+    if (selectedProjectId === projectId) {
+      setJobs([]);
+      setSelectedJobId(null);
+      setSelectedProjectId(remainingProjects[0]?.id ?? null);
+      if (remainingProjects.length === 0) clearProjectJobSelection();
+    }
   }
 
   return (
@@ -155,6 +237,8 @@ export default function App() {
               onUpdateProject={updateProject}
               onCreateJob={createJob}
               onDuplicateJob={duplicateJob}
+              onDeleteJob={deleteJob}
+              onDeleteProject={deleteProject}
               onSelectJob={setSelectedJobId}
               projectsLoading={projectsLoading}
               projectsError={projectsError}
@@ -162,7 +246,7 @@ export default function App() {
               jobsError={jobsError}
             />
           } />
-          <Route path="/inputs" element={<InputsPage project={selectedProject} job={selectedJob} />} />
+          <Route path="/inputs" element={null} />
           <Route path="/parameters" element={null} />
           <Route path="/results" element={<PlaceholderPage title="Run & Results" step="04" />} />
           <Route path="*" element={<Navigate to="/setup" replace />} />
@@ -170,6 +254,9 @@ export default function App() {
         </div>
         <div hidden={!parametersActive}>
           <CalibrationPage project={selectedProject} job={selectedJob} isActive={parametersActive} />
+        </div>
+        <div hidden={!inputsActive}>
+          <InputsPage project={selectedProject} job={selectedJob} />
         </div>
       </main>
     </div>

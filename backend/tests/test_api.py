@@ -78,6 +78,85 @@ def test_upload_and_list_metadata_without_storage_path(
     assert stored_files[0].name != "forcing.csv"
 
 
+def test_job_accepts_only_one_canonical_rat_configuration(
+    client: TestClient,
+    project_and_job: tuple[str, str],
+    backend_settings: Settings,
+) -> None:
+    project_id, job_id = project_and_job
+    first = client.post(
+        f"/api/projects/{project_id}/jobs/{job_id}/uploads",
+        files={"file": ("rat_config.yaml", b"BASIN: {}\n", "application/yaml")},
+    )
+    assert first.status_code == 201
+
+    duplicate = client.post(
+        f"/api/projects/{project_id}/jobs/{job_id}/uploads",
+        files={"file": ("rat_config_template.yml", b"BASIN: {}\n", "application/yaml")},
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == "A RAT configuration already exists for this job. Delete it before uploading a replacement."
+    uploads = client.get(f"/api/projects/{project_id}/jobs/{job_id}/uploads").json()
+    assert [upload["id"] for upload in uploads] == [first.json()["id"]]
+    assert len(list(backend_settings.upload_dir.iterdir())) == 1
+
+    unrelated_yaml = client.post(
+        f"/api/projects/{project_id}/jobs/{job_id}/uploads",
+        files={"file": ("forcing.yaml", b"source: local\n", "application/yaml")},
+    )
+    assert unrelated_yaml.status_code == 201
+
+
+def test_upload_rejects_duplicate_filename_within_job_without_replacing_bytes(
+    client: TestClient,
+    project_and_job: tuple[str, str],
+    backend_settings: Settings,
+) -> None:
+    project_id, job_id = project_and_job
+    endpoint = f"/api/projects/{project_id}/jobs/{job_id}/uploads"
+    first_bytes = b"first version"
+    first = client.post(endpoint, files={"file": ("vic_params.txt", first_bytes, "text/plain")})
+    assert first.status_code == 201
+
+    duplicate = client.post(endpoint, files={"file": ("vic_params.txt", b"replacement", "text/plain")})
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == (
+        "A file named 'vic_params.txt' already exists in this job. "
+        "Delete the existing file before uploading a replacement."
+    )
+    uploads = client.get(endpoint).json()
+    assert [upload["id"] for upload in uploads] == [first.json()["id"]]
+    stored_files = list(backend_settings.upload_dir.iterdir())
+    assert len(stored_files) == 1
+    assert stored_files[0].read_bytes() == first_bytes
+
+    different_name = client.post(endpoint, files={"file": ("route_param.txt", b"other", "text/plain")})
+    assert different_name.status_code == 201
+
+
+def test_same_filename_is_allowed_in_another_job_and_after_deletion(
+    client: TestClient,
+    project_and_job: tuple[str, str],
+) -> None:
+    project_id, first_job_id = project_and_job
+    second_job = client.post(
+        f"/api/projects/{project_id}/jobs",
+        json={"name": "Second job"},
+    ).json()
+    first_endpoint = f"/api/projects/{project_id}/jobs/{first_job_id}/uploads"
+    second_endpoint = f"/api/projects/{project_id}/jobs/{second_job['id']}/uploads"
+
+    first = client.post(first_endpoint, files={"file": ("vic_params.txt", b"first job", "text/plain")})
+    second = client.post(second_endpoint, files={"file": ("vic_params.txt", b"second job", "text/plain")})
+    assert first.status_code == 201
+    assert second.status_code == 201
+
+    deleted = client.delete(f"{first_endpoint}/{first.json()['id']}")
+    assert deleted.status_code == 204
+    replacement = client.post(first_endpoint, files={"file": ("vic_params.txt", b"replacement", "text/plain")})
+    assert replacement.status_code == 201
+
+
 def test_reject_empty_upload(client: TestClient, project_and_job: tuple[str, str]) -> None:
     project_id, job_id = project_and_job
     response = client.post(
