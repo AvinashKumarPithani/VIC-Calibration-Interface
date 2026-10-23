@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 from app.models import Job, Project, Upload
 from app.models.records import utc_now
 from app.schemas.records import JobCreate, JobRead, ProjectCreate, ProjectRead, UploadRead
+from app.schemas.inspection import UploadInspectionRead
+from app.services.inspection import inspect_upload_content, read_stored_upload
 from app.services.uploads import (
     EmptyUpload,
     InvalidUploadName,
@@ -174,6 +176,33 @@ def list_uploads(project_id: str, job_id: str, db: Session = Depends(get_session
     statement = select(Upload).where(Upload.project_id == project_id, Upload.job_id == job_id).order_by(Upload.uploaded_at.desc(), Upload.id)
     return list(db.scalars(statement).all())
 
+
+@router.get(
+    "/api/projects/{project_id}/jobs/{job_id}/uploads/{upload_id}/inspection",
+    response_model=UploadInspectionRead,
+    tags=["uploads"],
+)
+def inspect_job_upload(
+    project_id: str,
+    job_id: str,
+    upload_id: str,
+    request: Request,
+    db: Session = Depends(get_session),
+) -> UploadInspectionRead:
+    if db.get(Project, project_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+    job = db.scalar(select(Job).where(Job.id == job_id, Job.project_id == project_id))
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found in this project.")
+    upload = db.scalar(select(Upload).where(
+        Upload.id == upload_id,
+        Upload.project_id == project_id,
+        Upload.job_id == job_id,
+    ))
+    if upload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found for this job.")
+    content = read_stored_upload(upload, request.app.state.settings.upload_dir)
+    return inspect_upload_content(upload, content)
 
 @router.delete(
     "/api/projects/{project_id}/jobs/{job_id}/uploads/{upload_id}",

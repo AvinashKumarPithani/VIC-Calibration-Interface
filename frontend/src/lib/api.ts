@@ -29,6 +29,38 @@ export interface RecordPayload {
   description: string;
 }
 
+export interface InspectionParseError {
+  code: string;
+  message: string;
+  line: number | null;
+  column: number | null;
+}
+
+export interface InspectedYamlNode {
+  kind: "mapping" | "sequence" | "scalar" | "null" | "redacted";
+  scalar_type: string | null;
+  value: unknown;
+  entries: Array<{ key: unknown; value: InspectedYamlNode }>;
+  items: InspectedYamlNode[];
+}
+
+export type UploadInspectionRepresentation =
+  | { kind: "yaml_tree"; root: InspectedYamlNode }
+  | { kind: "vic_parameter_lines"; lines: Array<{ line_number: number; kind: "blank" | "comment" | "entry"; raw: string; option: string | null; values: string[]; value_text: string | null }> }
+  | { kind: "routing_positional_records"; records: Array<{ heading: string | null; heading_raw: string | null; heading_line_number: number | null; lines: Array<{ line_number: number; raw: string }> }> }
+  | { kind: "unit_hydrograph_rows"; rows: Array<{ line_number: number; index_token: string; value_token: string; index: number; value: number }> };
+
+export interface UploadInspection {
+  upload: UploadMetadata;
+  detected_format: "rat_yaml" | "metsim_yaml" | "vic_global_text" | "routing_parameter_text" | "unit_hydrograph_text" | "unknown";
+  parse_status: "parsed" | "malformed" | "unsupported";
+  parse_errors: InspectionParseError[];
+  rat_compatibility: "not_checked";
+  dependency_availability: "not_checked";
+  scientific_validity: "not_checked";
+  representation: UploadInspectionRepresentation | null;
+}
+
 const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 const baseUrl = configuredBaseUrl.replace(/\/$/, "");
 
@@ -86,6 +118,9 @@ export const api = {
   }),
   listUploads: (projectId: string, jobId: string) => request<UploadMetadata[]>(
     `/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/uploads`,
+  ),
+  inspectUpload: (projectId: string, jobId: string, uploadId: string) => request<UploadInspection>(
+    `/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/uploads/${encodeURIComponent(uploadId)}/inspection`,
   ),
   deleteUpload: (projectId: string, jobId: string, uploadId: string) => request<void>(
     `/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/uploads/${encodeURIComponent(uploadId)}`,

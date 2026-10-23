@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { Navigate, NavLink, Route, Routes } from "react-router-dom";
+import { Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import SetupPage from "./features/setup/SetupPage";
 import InputsPage from "./features/inputs/InputsPage";
+import CalibrationPage from "./features/calibration/CalibrationPage";
 import { api, type ApiJob, type ApiProject } from "./lib/api";
 import type { CalibrationJob, JobDraft, Project, ProjectDraft } from "./features/setup/types";
 
@@ -39,6 +40,8 @@ function mapJob(record: ApiJob): CalibrationJob {
 }
 
 export default function App() {
+  const location = useLocation();
+  const parametersActive = location.pathname === "/parameters";
   const [projects, setProjects] = useState<Project[]>([]);
   const [jobs, setJobs] = useState<CalibrationJob[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -138,6 +141,7 @@ export default function App() {
       </header>
 
       <main>
+        <div hidden={parametersActive}>
         <Routes>
           <Route path="/" element={<Navigate to="/setup" replace />} />
           <Route path="/setup" element={
@@ -159,10 +163,14 @@ export default function App() {
             />
           } />
           <Route path="/inputs" element={<InputsPage project={selectedProject} job={selectedJob} />} />
-          <Route path="/parameters" element={<PlaceholderPage title="Parameters & Calibration" step="03" />} />
+          <Route path="/parameters" element={null} />
           <Route path="/results" element={<PlaceholderPage title="Run & Results" step="04" />} />
           <Route path="*" element={<Navigate to="/setup" replace />} />
         </Routes>
+        </div>
+        <div hidden={!parametersActive}>
+          <CalibrationPage project={selectedProject} job={selectedJob} isActive={parametersActive} />
+        </div>
       </main>
     </div>
   );
