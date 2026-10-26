@@ -21,8 +21,7 @@ from app.services.record_deletion import recover_staged_upload_deletions
 def migrate_upload_categories(engine: Engine) -> None:
     """Upgrade old rows using the disjoint file choices of the two legacy UI workflows.
 
-    Tab 2 accepted YAML and TXT files; Tab 3's dedicated uploader accepted only its
-    canonical NetCDF files. Unknown extensions remain unclassified rather than being
+    Tab 2 accepted configuration files; Tab 3 accepts NetCDF datasets. Unknown extensions remain unclassified rather than being
     guessed into either collection.
     """
     with engine.begin() as connection:
@@ -32,6 +31,8 @@ def migrate_upload_categories(engine: Engine) -> None:
                 "ALTER TABLE uploads ADD COLUMN upload_category VARCHAR(40) "
                 "NOT NULL DEFAULT 'legacy_unclassified'"
             )
+        if "source_upload_id" not in columns:
+            connection.exec_driver_sql("ALTER TABLE uploads ADD COLUMN source_upload_id VARCHAR(36) REFERENCES uploads(id) ON DELETE SET NULL")
         connection.exec_driver_sql(
             """
             UPDATE uploads

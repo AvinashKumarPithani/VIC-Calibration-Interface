@@ -25,12 +25,6 @@ MAX_ATTRIBUTES_PER_VARIABLE = 32
 MAX_ATTRIBUTE_TEXT = 256
 MAX_ATTRIBUTE_ARRAY_ITEMS = 32
 
-# Candidate names supplied for discovery only; none are approved for editing.
-POTENTIAL_CANDIDATE_NAMES = frozenset({
-    "infilt", "ds", "dsmax", "ws", "depth", "ksat", "expt", "bubble",
-    "init_moist", "wcr_fract", "wpwp_fract", "resid_moist", "root_depth",
-    "root_fract", "lai", "cv",
-})
 _SENSITIVE_NAME = re.compile(r"secret|password|passwd|token|credential|api[_-]?key|private[_-]?key", re.I)
 _PATH_VALUE = re.compile(r"(?:^|\s)(?:[A-Za-z]:[\\/]|/(?!/)|\\\\[^\\]+\\)", re.I)
 _SECRET_VALUE = re.compile(r"(?:password|passwd|secret|token|credential)\s*[:=]", re.I)
@@ -120,6 +114,10 @@ def parse_netcdf_path(path: Path) -> NetCDFDatasetRepresentation:
             ]
             remaining_budget = MAX_TOTAL_ELEMENTS
             represented_variables: list[NetCDFVariable] = []
+            coordinate_names = set(dataset.dimensions)
+            for candidate in dataset.variables.values():
+                if "coordinates" in candidate.ncattrs():
+                    coordinate_names.update(str(candidate.getncattr("coordinates")).split())
             for name, variable in variables:
                 shape = [int(size) for size in variable.shape]
                 element_count = math.prod(shape) if shape else 1
@@ -153,12 +151,13 @@ def parse_netcdf_path(path: Path) -> NetCDFDatasetRepresentation:
                     attributes=attributes,
                     numeric_summary=summary,
                     summary_status=summary_status,
-                    potential_calibration_candidate=is_numeric and name.casefold() in POTENTIAL_CANDIDATE_NAMES,
+                    is_coordinate=name in coordinate_names,
                 ))
             representation = NetCDFDatasetRepresentation(
                 dimensions=representation_dimensions,
                 variables=represented_variables,
                 variable_count=len(represented_variables),
+                attributes=_variable_attributes(dataset),
                 summary_limits=(
                     f"Exact summaries are computed for variables up to {MAX_ELEMENTS_PER_VARIABLE:,} elements, "
                     f"within a {MAX_TOTAL_ELEMENTS:,}-element total inspection budget. Larger variables are listed without summaries."

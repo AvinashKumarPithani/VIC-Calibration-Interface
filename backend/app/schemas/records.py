@@ -55,6 +55,7 @@ class UploadRead(BaseModel):
     upload_category: Literal["configuration_input", "netcdf_parameter_dataset", "legacy_unclassified"]
     file_size: int
     uploaded_at: datetime
+    source_upload_id: str | None = None
 
 
 UploadCategory = Literal["configuration_input", "netcdf_parameter_dataset", "legacy_unclassified"]

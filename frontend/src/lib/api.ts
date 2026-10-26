@@ -23,7 +23,15 @@ export interface UploadMetadata {
   upload_category: UploadCategory;
   file_size: number;
   uploaded_at: string;
+  source_upload_id: string | null;
 }
+
+export interface NetCDFValues {
+  variable: string; dimensions: string[]; shape: number[]; selectors: Array<number | null>;
+  indices: number[][]; values: unknown[]; source_sha256: string; has_more: boolean;
+  varying_dimensions: string[]; window_starts: number[]; window_shape: number[];
+}
+export interface NetCDFCellEdit { variable: string; indices: number[]; value: unknown }
 
 export type UploadCategory = "configuration_input" | "netcdf_parameter_dataset" | "legacy_unclassified";
 export type NewUploadCategory = Exclude<UploadCategory, "legacy_unclassified">;
@@ -72,10 +80,11 @@ export type UploadInspectionRepresentation =
           median: number | null;
         } | null;
         summary_status: "complete" | "limit_reached" | "not_numeric";
-        potential_calibration_candidate: boolean;
+        is_coordinate: boolean;
       }>;
       variable_count: number;
       summary_limits: string;
+      attributes: Record<string, unknown>;
     };
 
 export type EditableParameterFormat = "rat_yaml" | "metsim_yaml" | "vic_global_text" | "routing_parameter_text" | "unit_hydrograph_text";
@@ -216,5 +225,18 @@ export const api = {
       `/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/${category === "netcdf_parameter_dataset" ? "netcdf-uploads" : "uploads"}`,
       { method: "POST", body: formData },
     );
+  },
+  netcdfValues: (projectId: string, jobId: string, uploadId: string, variable: string, selectors: Array<number | null>, start = 0, windowStarts: number[] = [], windowLimits: number[] = []) => request<NetCDFValues>(
+    `/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/uploads/${encodeURIComponent(uploadId)}/netcdf-values`,
+    { method: "POST", body: JSON.stringify({ variable, selectors, start, limit: 1000, window_starts: windowStarts, window_limits: windowLimits }) },
+  ),
+  saveNetcdfEdits: (projectId: string, jobId: string, uploadId: string, source_sha256: string, edits: NetCDFCellEdit[]) => request<UploadMetadata>(
+    `/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/uploads/${encodeURIComponent(uploadId)}/netcdf-edits`,
+    { method: "POST", body: JSON.stringify({ source_sha256, edits }) },
+  ),
+  downloadNetcdf: async (projectId: string, jobId: string, uploadId: string) => {
+    const response = await fetch(`${baseUrl}/api/projects/${encodeURIComponent(projectId)}/jobs/${encodeURIComponent(jobId)}/uploads/${encodeURIComponent(uploadId)}/download`);
+    if (!response.ok) throw new Error("The verified NetCDF output could not be downloaded.");
+    return response.blob();
   },
 };

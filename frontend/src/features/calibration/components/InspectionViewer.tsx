@@ -199,15 +199,15 @@ function HydrographView({ rows }: { rows: Extract<UploadInspectionRepresentation
   );
 }
 
-function NetCDFView({ dataset }: { dataset: Extract<UploadInspectionRepresentation, { kind: "netcdf_dataset" }> }) {
+function NetCDFView({ dataset, selectedVariable, onSelectVariable }: { dataset: Extract<UploadInspectionRepresentation, { kind: "netcdf_dataset" }>; selectedVariable?: string | null; onSelectVariable?: (name: string) => void }) {
   const [query, setQuery] = useState("");
   const filteredVariables = dataset.variables.filter((variable) =>
     variable.name.toLowerCase().includes(query.trim().toLowerCase()),
   );
-  const candidateVariables = filteredVariables.filter((variable) => variable.potential_calibration_candidate);
-  const otherVariables = filteredVariables.filter((variable) => !variable.potential_calibration_candidate);
+  const coordinates = filteredVariables.filter((variable) => variable.is_coordinate);
+  const dataVariables = filteredVariables.filter((variable) => !variable.is_coordinate);
 
-  function variableTable(variables: typeof dataset.variables) {
+  function variableTable(variables: typeof dataset.variables, selectable = false) {
     return (
       <div className="overflow-x-auto rounded-lg border border-slate-200">
         <table className="w-full min-w-[850px] text-left text-xs">
@@ -220,10 +220,9 @@ function NetCDFView({ dataset }: { dataset: Extract<UploadInspectionRepresentati
           </thead>
           <tbody className="divide-y divide-slate-100 bg-white">
             {variables.map((variable) => (
-              <tr key={variable.name} className="align-top">
+              <tr key={variable.name} aria-selected={selectable ? selectedVariable === variable.name : undefined} className={`align-top ${selectable && selectedVariable === variable.name ? "bg-blue-50" : ""}`}>
                 <td className="px-3 py-2 font-mono font-semibold text-slate-800">
-                  {variable.name}
-                  {variable.potential_calibration_candidate && <span className="mt-1 block max-w-48 rounded bg-amber-50 px-1.5 py-1 font-sans text-[10px] font-medium text-amber-800">Potential calibration candidate · requires scientific confirmation</span>}
+                  {selectable && onSelectVariable ? <button type="button" aria-pressed={selectedVariable === variable.name} onClick={() => onSelectVariable(variable.name)} className="text-left text-blue-800 underline decoration-dotted underline-offset-2">{variable.name}<span className="ml-1 font-sans text-[10px] font-normal">select for value editor</span></button> : variable.name}
                   {Object.keys(variable.attributes).length > 0 && <details className="mt-1 font-sans font-normal">
                     <summary className="cursor-pointer text-[10px] text-blue-700">Variable attributes</summary>
                     <dl className="mt-1 space-y-1 text-[10px] text-slate-600">
@@ -260,30 +259,30 @@ function NetCDFView({ dataset }: { dataset: Extract<UploadInspectionRepresentati
     <section className="space-y-4" aria-label="NetCDF dataset inspection">
       <details className="text-xs text-slate-500">
         <summary className="w-fit cursor-pointer select-none rounded px-1 py-0.5 text-blue-700 hover:bg-blue-50">ⓘ About this inspection</summary>
-        <p className="mt-1 max-w-3xl rounded-md bg-slate-50 px-2 py-1.5 leading-5">Dataset metadata parsing does not validate RAT compatibility or scientific validity. Candidate labels are for discovery only, are not approved calibration controls, and all NetCDF values are read-only.</p>
+        <p className="mt-1 max-w-3xl rounded-md bg-slate-50 px-2 py-1.5 leading-5">Dataset metadata parsing does not validate RAT compatibility or scientific validity. Data variable values can be reviewed and edited below. Coordinates and metadata remain read-only.</p>
       </details>
       <div className="rounded-lg border border-slate-200 bg-white p-3">
         <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-600">Dataset dimensions</h3>
         {dataset.dimensions.length ? <dl className="mt-2 flex flex-wrap gap-2">{dataset.dimensions.map((dimension) => <div key={dimension.name} className="rounded-md bg-slate-50 px-2.5 py-1.5 text-xs"><dt className="inline font-medium text-slate-700">{dimension.name}: </dt><dd className="inline text-slate-600">{dimension.size.toLocaleString()}</dd></div>)}</dl> : <p className="mt-2 text-xs text-slate-500">No named dimensions.</p>}
-        <p className="mt-2 text-xs text-slate-500">{dataset.variable_count.toLocaleString()} variables. {dataset.summary_limits}</p>
+        <p className="mt-2 text-xs text-slate-500">{dataset.variable_count.toLocaleString()} variables. {dataset.summary_limits}</p>{Object.keys(dataset.attributes).length > 0 && <details className="mt-2 text-xs"><summary className="cursor-pointer text-blue-700">Dataset attributes</summary><dl className="mt-1 space-y-1">{Object.entries(dataset.attributes).map(([key, value]) => <div key={key}><dt className="inline font-medium">{key}: </dt><dd className="inline">{typeof value === "string" ? value : JSON.stringify(value)}</dd></div>)}</dl></details>}
       </div>
       <label className="block text-xs font-medium text-slate-700">
         Filter variables
         <input value={query} onChange={(event) => setQuery(event.target.value)} type="search" className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm" placeholder="Search variable names..." />
       </label>
       <section>
-        <h3 className="mb-2 text-sm font-semibold text-slate-900">Potential calibration candidates ({candidateVariables.length})</h3>
-        {candidateVariables.length ? variableTable(candidateVariables) : <p className="rounded-md bg-slate-50 p-3 text-xs text-slate-500">No listed candidate variables were found in this dataset.</p>}
+        <h3 className="mb-2 text-sm font-semibold text-slate-900">Data variables ({dataVariables.length})</h3>
+        {variableTable(dataVariables, true)}
       </section>
       <section>
-        <h3 className="mb-2 text-sm font-semibold text-slate-900">Other dataset variables ({otherVariables.length})</h3>
-        {variableTable(otherVariables)}
+        <h3 className="mb-2 text-sm font-semibold text-slate-900">Coordinates ({coordinates.length})</h3>
+        {coordinates.length ? variableTable(coordinates) : <p className="text-xs text-slate-500">No coordinate variables.</p>}
       </section>
     </section>
   );
 }
 
-export default function InspectionViewer({ inspection }: { inspection: UploadInspection }) {
+export default function InspectionViewer({ inspection, selectedNetCDFVariable, onSelectNetCDFVariable }: { inspection: UploadInspection; selectedNetCDFVariable?: string | null; onSelectNetCDFVariable?: (name: string) => void }) {
   const representation = inspection.representation;
   if (!representation) return <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">This file could not be displayed in a supported parameter view. {inspection.parse_errors[0]?.message ?? "The backend did not return a supported representation."}</p>;
   switch (representation.kind) {
@@ -291,7 +290,7 @@ export default function InspectionViewer({ inspection }: { inspection: UploadIns
     case "vic_parameter_lines": return <VicLinesView lines={representation.lines} />;
     case "routing_positional_records": return <RoutingRecordsView records={representation.records} />;
     case "unit_hydrograph_rows": return <HydrographView rows={representation.rows} />;
-    case "netcdf_dataset": return <NetCDFView dataset={representation} />;
+    case "netcdf_dataset": return <NetCDFView dataset={representation} selectedVariable={selectedNetCDFVariable} onSelectVariable={onSelectNetCDFVariable} />;
     default: return <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">No viewer is available for this inspection format.</p>;
   }
 }

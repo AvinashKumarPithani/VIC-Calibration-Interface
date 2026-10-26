@@ -71,6 +71,7 @@ class Upload(Base):
         server_default=text("'legacy_unclassified'"),
     )
     storage_filename: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    source_upload_id: Mapped[str | None] = mapped_column(ForeignKey("uploads.id", ondelete="SET NULL"), nullable=True, index=True)
     file_size: Mapped[int] = mapped_column(nullable=False)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 

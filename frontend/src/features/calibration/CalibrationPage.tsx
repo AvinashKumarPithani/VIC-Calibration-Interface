@@ -6,6 +6,7 @@ import { clearSavedInspectionUploadId, readSavedInspectionUploadId, saveInspecti
 import { notifyUploadDeleted, notifyUploadInspectionFailed, notifyUploadInspected, UPLOAD_DELETED_EVENT, UPLOAD_INSPECTED_EVENT, type DeletedUploadContext } from "../../lib/uploadEvents";
 import InspectionViewer from "./components/InspectionViewer";
 import ParameterEditPanel from "./components/ParameterEditPanel";
+import NetCDFValueEditor from "./components/NetCDFValueEditor";
 
 interface CalibrationPageProps {
   project: Project | null;
@@ -70,6 +71,7 @@ export default function CalibrationPage({ project, job, isActive }: CalibrationP
   const [deletingUploadId, setDeletingUploadId] = useState<string | null>(null);
   const netcdfInputRef = useRef<HTMLInputElement>(null);
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
+  const [netcdfVariableSelection, setNetcdfVariableSelection] = useState<{ uploadId: string; name: string } | null>(null);
   const [inspection, setInspection] = useState<UploadInspection | null>(null);
   const [inspectionLoading, setInspectionLoading] = useState(false);
   const [inspectionError, setInspectionError] = useState<string | null>(null);
@@ -154,6 +156,7 @@ export default function CalibrationPage({ project, job, isActive }: CalibrationP
     setNetcdfDeleteError(null);
     setNetcdfDeleteNotice(null);
     setSelectedUploadId(null);
+    setNetcdfVariableSelection(null);
     setInspection(null);
     setInspectionLoading(false);
     setInspectionError(null);
@@ -347,6 +350,7 @@ export default function CalibrationPage({ project, job, isActive }: CalibrationP
     const currentRequest = ++requestId.current;
     draftRequestId.current += 1;
     selectedUploadRef.current = upload.id;
+    if (selectedUploadId !== upload.id) setNetcdfVariableSelection(null);
     setSelectedUploadId(upload.id);
     setInspection(null);
     setInspectionError(null);
@@ -386,9 +390,8 @@ export default function CalibrationPage({ project, job, isActive }: CalibrationP
 
   async function uploadNetcdfFile() {
     if (!project || !job || job.projectId !== project.id || !netcdfFile) return;
-    const allowedNames = new Set(["vic_soil_param.nc", "vic_domain.nc"]);
-    if (!allowedNames.has(netcdfFile.name.toLowerCase())) {
-      setNetcdfUploadError("Select vic_soil_param.nc or vic_domain.nc.");
+    if (!netcdfFile.name.toLowerCase().endsWith(".nc")) {
+      setNetcdfUploadError("Select a .nc NetCDF file.");
       return;
     }
     if (netcdfFile.size > 256 * 1024 * 1024) {
@@ -451,6 +454,10 @@ export default function CalibrationPage({ project, job, isActive }: CalibrationP
 
   const selectedUpload = uploads.find((upload) => upload.id === selectedUploadId) ?? null;
   const summary = inspection ? recordSummary(inspection) : null;
+  const inspectedNetCDF = inspection?.representation?.kind === "netcdf_dataset" ? inspection.representation : null;
+  const netcdfEditorVariableName = selectedUploadId && netcdfVariableSelection?.uploadId === selectedUploadId
+    ? netcdfVariableSelection.name
+    : inspectedNetCDF?.variables.find((variable) => !variable.is_coordinate)?.name ?? null;
 
   if (!project || !job || job.projectId !== project.id) {
     return (
@@ -488,7 +495,7 @@ export default function CalibrationPage({ project, job, isActive }: CalibrationP
             </div>
             <div className="mt-3 rounded-lg border border-sky-100 bg-sky-50/60 p-3">
               <h3 className="text-xs font-semibold text-slate-900">Upload VIC NetCDF dataset</h3>
-              <p className="mt-1 text-[11px] leading-4 text-slate-600">Choose vic_soil_param.nc or optional vic_domain.nc (maximum 256 MiB).</p>
+              <p className="mt-1 text-[11px] leading-4 text-slate-600">Choose a NetCDF .nc file (maximum 256 MiB).</p>
               <input
                 ref={netcdfInputRef}
                 type="file"
@@ -547,6 +554,7 @@ export default function CalibrationPage({ project, job, isActive }: CalibrationP
                   <div className="min-w-0"><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Selected upload</p><h2 className="mt-1 break-words text-base font-semibold text-slate-900">{selectedUpload.original_filename}</h2><p className="mt-1 text-xs text-slate-500">{fileType(selectedUpload.original_filename)} | {formatSize(selectedUpload.file_size)} | Uploaded {formatDate(selectedUpload.uploaded_at)}</p></div>
                   {inspection && <div className="flex flex-wrap items-center justify-end gap-2">
                     <div className="flex flex-wrap gap-1.5 text-[10px]">{[inspection.detected_format.replaceAll("_", " "), inspection.parse_status, summary, parameterDraft ? `Draft v${parameterDraft.revision}` : null].filter((item): item is string => item !== null).map((item) => <span key={item} className="rounded-full bg-slate-100 px-2 py-1 font-medium capitalize text-slate-700">{item}</span>)}</div>
+                    {selectedUpload && project && job && <button type="button" onClick={() => void api.downloadNetcdf(project.id, job.id, selectedUpload.id).then((blob) => { const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = selectedUpload.original_filename; anchor.click(); URL.revokeObjectURL(url); }).catch((error: unknown) => setNetcdfDeleteError(error instanceof Error ? error.message : "Download failed."))} className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700">Download .nc</button>}
                     {inspection.parse_status === "parsed" && inspection.representation && inspection.detected_format !== "vic_netcdf" && !editingParameters && <button type="button" onClick={() => { setDraftSaveError(null); setEditingParameters(true); }} className="rounded-md border border-blue-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50">Edit Parameters</button>}
                   </div>}
                 </div>
@@ -554,6 +562,11 @@ export default function CalibrationPage({ project, job, isActive }: CalibrationP
                 {inspectionError && <div role="alert" className="mb-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800"><p className="font-medium">Inspection failed</p><p className="mt-1">{inspectionError}</p><button type="button" onClick={() => void selectUpload(selectedUpload)} className="mt-2 font-semibold underline">Retry</button></div>}
                 {inspection && !inspectionLoading && (
                   <div className="min-h-0 flex-1 overflow-y-auto">
+                    {inspection.detected_format === "vic_netcdf" && inspection.representation?.kind === "netcdf_dataset" && project && job && selectedUploadId && <NetCDFValueEditor key={selectedUploadId} projectId={project.id} jobId={job.id} uploadId={selectedUploadId} dataset={inspection.representation} selectedVariable={netcdfEditorVariableName} onVariableChange={(name) => setNetcdfVariableSelection({ uploadId: selectedUploadId, name })} onSaved={(artifact) => {
+                      setUploads((current) => [artifact, ...current]);
+                      uploadsRef.current = [artifact, ...uploadsRef.current];
+                      setNetcdfUploadNotice(`Verified output ${artifact.original_filename} is ready. Select it in the file list to inspect it.`);
+                    }} />}
                     {inspection.parse_status !== "parsed" && <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 p-3"><h3 className="text-sm font-semibold text-amber-900">Inspection: {inspection.parse_status}</h3>{inspection.parse_errors.length === 0 ? <p className="mt-1 text-xs text-amber-800">No additional diagnostics were returned.</p> : <ul className="mt-1 list-inside list-disc space-y-1">{inspection.parse_errors.map((error, index) => <li key={`${error.code}-${index}`} className="text-xs text-amber-900">{error.message}{error.line !== null ? ` (line ${error.line}${error.column !== null ? `, column ${error.column}` : ""})` : ""}</li>)}</ul>}</div>}
                     {inspection.parse_status === "parsed" && inspection.detected_format !== "vic_netcdf" && <div className="mb-3 rounded-lg border border-sky-100 bg-sky-50 px-3 py-2 text-xs text-sky-900">Parsed structure only. RAT compatibility, dependency availability, and scientific validity: not checked.</div>}
                     {draftLoading && <p role="status" className="mb-2 text-xs text-slate-500">Loading saved parameter draft...</p>}
@@ -563,7 +576,9 @@ export default function CalibrationPage({ project, job, isActive }: CalibrationP
                       <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold text-violet-950">Saved draft changes</h3><button type="button" onClick={() => void discardDraft()} className="rounded-md px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50">Discard Draft</button></div>
                       <ul className="mt-2 space-y-2">{parameterDraft.changes.map((change) => { const field = inspection.editable_fields.find((item) => item.field_id === change.field_id); return <li key={change.field_id} className="break-words rounded-md bg-white px-3 py-2 text-xs"><span className="font-semibold text-slate-800">{field?.label ?? "Previously approved field"}</span><div className="mt-1 grid gap-1 sm:grid-cols-2"><span className="text-slate-600">Original: <code>{field ? String(field.current_value ?? "null") : "Unavailable"}</code></span><span className="text-violet-800">Proposed: <code>{String(change.value ?? "null")}</code></span></div></li>; })}</ul>
                     </section>}
-                    {editingParameters ? <ParameterEditPanel fields={inspection.editable_fields} draft={parameterDraft} saving={draftSaving} saveError={draftSaveError} onCancel={() => { setEditingParameters(false); setDraftSaveError(null); }} onSave={saveDraft} /> : <InspectionViewer inspection={inspection} />}
+                    {editingParameters ? <ParameterEditPanel fields={inspection.editable_fields} draft={parameterDraft} saving={draftSaving} saveError={draftSaveError} onCancel={() => { setEditingParameters(false); setDraftSaveError(null); }} onSave={saveDraft} /> : <>
+                      <InspectionViewer inspection={inspection} selectedNetCDFVariable={netcdfEditorVariableName} onSelectNetCDFVariable={(name) => { if (selectedUploadId) setNetcdfVariableSelection({ uploadId: selectedUploadId, name }); }} />
+                    </>}
                   </div>
                 )}
               </>

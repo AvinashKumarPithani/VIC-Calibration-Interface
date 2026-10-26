@@ -70,7 +70,6 @@ def test_netcdf_upload_inspection_summarizes_variables_and_preserves_source(
         "maximum": 5.0,
         "median": 3.0,
     }
-    assert variables["infilt"]["potential_calibration_candidate"] is True
     assert variables["infilt"]["attributes"]["source_path"] == "[omitted]"
     assert "access_token" not in variables["infilt"]["attributes"]
     assert "/private/server/location/file.nc" not in inspected.text
@@ -94,12 +93,14 @@ def test_malformed_netcdf_is_rejected_without_upload_record_or_file(
     assert list(client.app.state.settings.upload_dir.iterdir()) == []
 
 
-def test_netcdf_upload_rejects_unknown_name_and_non_netcdf_extension(
+def test_netcdf_upload_accepts_general_netcdf_names_and_rejects_non_netcdf_extension(
     client: TestClient,
     project_and_job: tuple[str, str],
 ) -> None:
     project_id, job_id = project_and_job
-    assert upload_netcdf(client, project_id, job_id, "other.nc", b"anything").status_code == 415
+    generic = create_dataset(Path(client.app.state.settings.upload_dir).parent / "generic.nc")
+    assert upload_netcdf(client, project_id, job_id, "other.nc", generic).status_code == 201
+    assert upload_netcdf(client, project_id, job_id, "not-netcdf.txt", b"anything").status_code == 415
     text_upload = client.post(
         f"/api/projects/{project_id}/jobs/{job_id}/uploads",
         files={"file": ("vic_soil_param.txt", b"text data", "text/plain")},

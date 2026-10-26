@@ -6,7 +6,6 @@ from uuid import uuid4
 from fastapi import UploadFile
 
 ALLOWED_FILE_EXTENSIONS = frozenset({".yaml", ".yml", ".json", ".txt", ".csv", ".zip", ".nc"})
-NETCDF_UPLOAD_FILENAMES = frozenset({"vic_soil_param.nc", "vic_domain.nc"})
 CONFIGURATION_INPUT_CATEGORY = "configuration_input"
 NETCDF_PARAMETER_DATASET_CATEGORY = "netcdf_parameter_dataset"
 LEGACY_UNCLASSIFIED_CATEGORY = "legacy_unclassified"

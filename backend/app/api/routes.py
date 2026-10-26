@@ -3,8 +3,10 @@ from __future__ import annotations
 from collections.abc import Generator
 import hashlib
 from pathlib import Path, PureWindowsPath
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -14,8 +16,10 @@ from app.models.records import utc_now
 from app.schemas.records import JobCreate, JobRead, ProjectCreate, ProjectRead, UploadCategory, UploadRead
 from app.schemas.inspection import UploadInspectionRead
 from app.schemas.parameter_drafts import ParameterDraftRead, ParameterDraftSave
+from app.schemas.netcdf_editor import NetCDFEditSave, NetCDFValuesRead, NetCDFValuesRequest
 from app.services.inspection import inspect_upload_content, read_stored_upload, stored_upload_path
 from app.services.netcdf_inspection import NetCDFInspectionError, inspect_netcdf_path, parse_netcdf_path
+from app.services.netcdf_editor import NetCDFEditError, fingerprint as netcdf_fingerprint, read_values as read_netcdf_values, save_edits as save_netcdf_edits
 from app.services import parameter_drafts as draft_policy
 from app.services.record_deletion import (
     UploadStorageDeletionError,
@@ -29,7 +33,6 @@ from app.services.uploads import (
     UploadTooLarge,
     UnsupportedUploadType,
     RAT_CONFIGURATION_FILENAMES,
-    NETCDF_UPLOAD_FILENAMES,
     CONFIGURATION_INPUT_CATEGORY,
     NETCDF_PARAMETER_DATASET_CATEGORY,
     is_rat_configuration_filename,
@@ -218,7 +221,7 @@ async def _create_upload(
         candidate_name = safe_original_filename(file.filename)
         candidate_extension = Path(candidate_name).suffix.lower()
         is_netcdf_upload = upload_category == NETCDF_PARAMETER_DATASET_CATEGORY
-        if is_netcdf_upload and (candidate_extension != ".nc" or candidate_name.lower() not in NETCDF_UPLOAD_FILENAMES):
+        if is_netcdf_upload and candidate_extension != ".nc":
             raise UnsupportedUploadType
         if not is_netcdf_upload and candidate_extension == ".nc":
             raise UnsupportedUploadType
@@ -403,14 +406,83 @@ def inspect_job_upload(
     if category is not None and upload.upload_category != category:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found in this collection.")
     if Path(upload.original_filename).suffix.lower() == ".nc":
-        if upload.original_filename.lower() not in NETCDF_UPLOAD_FILENAMES:
-            raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="This NetCDF filename is not supported.")
+        if upload.upload_category != NETCDF_PARAMETER_DATASET_CATEGORY:
+            raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="This upload is not a NetCDF dataset.")
         netcdf_path = stored_upload_path(upload, request.app.state.settings.upload_dir)
         if not netcdf_path.is_file():
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Uploaded file content is unavailable.")
         return inspect_netcdf_path(upload, netcdf_path)
     content = read_stored_upload(upload, request.app.state.settings.upload_dir)
     return inspect_upload_content(upload, content)
+
+
+@router.post("/api/projects/{project_id}/jobs/{job_id}/uploads/{upload_id}/netcdf-values", response_model=NetCDFValuesRead, tags=["NetCDF editor"])
+def netcdf_values(project_id: str, job_id: str, upload_id: str, payload: NetCDFValuesRequest, request: Request, db: Session = Depends(get_session)) -> dict:
+    upload = _get_scoped_upload(project_id, job_id, upload_id, db)
+    if upload.upload_category != NETCDF_PARAMETER_DATASET_CATEGORY:
+        raise HTTPException(status_code=404, detail="NetCDF upload not found for this job.")
+    path = stored_upload_path(upload, request.app.state.settings.upload_dir)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Uploaded file content is unavailable.")
+    try:
+        return read_netcdf_values(path, payload.variable, payload.selectors, payload.start, payload.limit,
+                                  payload.window_starts, payload.window_limits)
+    except NetCDFEditError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
+
+
+@router.post("/api/projects/{project_id}/jobs/{job_id}/uploads/{upload_id}/netcdf-edits", response_model=UploadRead, status_code=status.HTTP_201_CREATED, tags=["NetCDF editor"])
+def save_netcdf_edits_endpoint(project_id: str, job_id: str, upload_id: str, payload: NetCDFEditSave, request: Request, db: Session = Depends(get_session)) -> Upload:
+    source = _get_scoped_upload(project_id, job_id, upload_id, db)
+    if source.upload_category != NETCDF_PARAMETER_DATASET_CATEGORY:
+        raise HTTPException(status_code=404, detail="NetCDF upload not found for this job.")
+    source_path = stored_upload_path(source, request.app.state.settings.upload_dir)
+    if not source_path.is_file():
+        raise HTTPException(status_code=404, detail="Uploaded file content is unavailable.")
+    if netcdf_fingerprint(source_path) != payload.source_sha256:
+        raise HTTPException(status_code=409, detail="The source file changed. Reload it before saving edits.")
+    storage_name = f"{uuid4().hex}.nc"
+    output_path = Path(request.app.state.settings.upload_dir) / storage_name
+    try:
+        save_netcdf_edits(source_path, output_path, payload.source_sha256, payload.edits)
+        file_size = output_path.stat().st_size
+        if file_size > request.app.state.settings.max_netcdf_upload_size_bytes:
+            raise NetCDFEditError("The verified output exceeds the configured NetCDF size limit.")
+        artifact = Upload(
+            project_id=project_id, job_id=job_id,
+            original_filename=f"edited_{Path(source.original_filename).stem}_{uuid4().hex[:8]}.nc",
+            upload_category=NETCDF_PARAMETER_DATASET_CATEGORY,
+            storage_filename=storage_name, file_size=file_size, source_upload_id=source.id,
+        )
+        parse_netcdf_path(output_path)
+        db.add(artifact)
+        db.commit()
+        db.refresh(artifact)
+        return artifact
+    except NetCDFEditError as error:
+        output_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail=str(error)) from None
+    except NetCDFInspectionError:
+        output_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail="The written NetCDF output failed inspection.") from None
+    except (IntegrityError, SQLAlchemyError):
+        db.rollback()
+        output_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail="The verified NetCDF output could not be registered.") from None
+    except OSError:
+        output_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail="The NetCDF output could not be stored.") from None
+
+
+@router.get("/api/projects/{project_id}/jobs/{job_id}/uploads/{upload_id}/download", tags=["uploads"])
+def download_upload(project_id: str, job_id: str, upload_id: str, request: Request, db: Session = Depends(get_session)) -> FileResponse:
+    upload = _get_scoped_upload(project_id, job_id, upload_id, db)
+    if upload.upload_category != NETCDF_PARAMETER_DATASET_CATEGORY:
+        raise HTTPException(status_code=404, detail="NetCDF upload not found for this job.")
+    path = stored_upload_path(upload, request.app.state.settings.upload_dir)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Uploaded file content is unavailable.")
+    return FileResponse(path, media_type="application/x-netcdf", filename=upload.original_filename)
 
 @router.get(
     "/api/projects/{project_id}/jobs/{job_id}/uploads/{upload_id}/draft",

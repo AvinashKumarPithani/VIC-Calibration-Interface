@@ -102,7 +102,8 @@ class NetCDFVariable(BaseModel):
     attributes: dict[str, Any] = {}
     numeric_summary: NetCDFNumericSummary | None = None
     summary_status: Literal["complete", "limit_reached", "not_numeric"]
-    potential_calibration_candidate: bool = False
+    is_coordinate: bool = False
+    is_coordinate: bool = False
 
 
 class NetCDFDatasetRepresentation(BaseModel):
@@ -111,6 +112,8 @@ class NetCDFDatasetRepresentation(BaseModel):
     variables: list[NetCDFVariable]
     variable_count: int
     summary_limits: str
+    attributes: dict[str, Any] = {}
+    attributes: dict[str, Any] = {}
 
 
 InspectionRepresentation = (
