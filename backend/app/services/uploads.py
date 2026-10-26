@@ -5,7 +5,11 @@ from uuid import uuid4
 
 from fastapi import UploadFile
 
-ALLOWED_FILE_EXTENSIONS = frozenset({".yaml", ".yml", ".json", ".txt", ".csv", ".zip"})
+ALLOWED_FILE_EXTENSIONS = frozenset({".yaml", ".yml", ".json", ".txt", ".csv", ".zip", ".nc"})
+NETCDF_UPLOAD_FILENAMES = frozenset({"vic_soil_param.nc", "vic_domain.nc"})
+CONFIGURATION_INPUT_CATEGORY = "configuration_input"
+NETCDF_PARAMETER_DATASET_CATEGORY = "netcdf_parameter_dataset"
+LEGACY_UNCLASSIFIED_CATEGORY = "legacy_unclassified"
 RAT_CONFIGURATION_FILENAMES = frozenset({"rat_config.yaml", "rat_config.yml", "rat_config_template.yaml", "rat_config_template.yml"})
 CHUNK_SIZE_BYTES = 64 * 1024
 

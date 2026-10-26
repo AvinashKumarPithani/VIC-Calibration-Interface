@@ -263,7 +263,7 @@ export default function InputsPage({ project, job }: InputsPageProps) {
     ratInspectionRequestId.current += 1;
     setRatConfigurationInspection(null);
     setRatInspectionLoadingId(null);
-    api.listUploads(project.id, job.id).then((records) => {
+    api.listUploads(project.id, job.id, "configuration_input").then((records) => {
       if (!active) return;
       setUploads(records);
       const saved = readSavedInspection();
@@ -354,7 +354,7 @@ export default function InputsPage({ project, job }: InputsPageProps) {
   }, []);
 
   async function fetchUploadInspection(projectId: string, jobId: string, upload: UploadMetadata): Promise<UploadInspection> {
-    const result = await api.inspectUpload(projectId, jobId, upload.id);
+    const result = await api.inspectUpload(projectId, jobId, upload.id, "configuration_input");
     if (result.upload.id !== upload.id || result.upload.project_id !== projectId || result.upload.job_id !== jobId) {
       throw new Error("The API returned inspection data for a different uploaded file.");
     }
@@ -469,7 +469,7 @@ export default function InputsPage({ project, job }: InputsPageProps) {
     setUploadsError(null);
 
     try {
-      const uploaded = await api.uploadFile(projectId, jobId, file);
+      const uploaded = await api.uploadFile(projectId, jobId, file, "configuration_input");
       if (currentContext.current.projectId !== projectId || currentContext.current.jobId !== jobId) return;
       if (uploaded.project_id !== projectId || uploaded.job_id !== jobId) {
         throw new Error("The API returned upload metadata for a different project or job.");
@@ -486,7 +486,7 @@ export default function InputsPage({ project, job }: InputsPageProps) {
       showUploadNotice(`${uploaded.original_filename} uploaded (${formatFileSize(uploaded.file_size)}). Its contents have not been checked.`, "success");
 
       try {
-        const refreshed = await api.listUploads(projectId, jobId);
+        const refreshed = await api.listUploads(projectId, jobId, "configuration_input");
         if (currentContext.current.projectId === projectId && currentContext.current.jobId === jobId) {
           uploadsRef.current = refreshed;
           setUploads(refreshed);
@@ -512,7 +512,7 @@ export default function InputsPage({ project, job }: InputsPageProps) {
     setDeletingUploadId(target.id);
     setDeleteError(null);
     try {
-      await api.deleteUpload(project.id, job.id, target.id);
+      await api.deleteUpload(project.id, job.id, target.id, "configuration_input");
       if (currentContext.current.projectId !== project.id || currentContext.current.jobId !== job.id) return;
       const remainingUploads = uploadsRef.current.filter((upload) => upload.id !== target.id);
       uploadsRef.current = remainingUploads;
@@ -561,7 +561,7 @@ export default function InputsPage({ project, job }: InputsPageProps) {
         : `${target.original_filename} deleted.`, "success");
       setPendingDelete(null);
       try {
-        const refreshed = await api.listUploads(project.id, job.id);
+        const refreshed = await api.listUploads(project.id, job.id, "configuration_input");
         if (currentContext.current.projectId === project.id && currentContext.current.jobId === job.id) {
           uploadsRef.current = refreshed;
           setUploads(refreshed);

@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -51,5 +52,9 @@ class UploadRead(BaseModel):
     project_id: str
     job_id: str
     original_filename: str
+    upload_category: Literal["configuration_input", "netcdf_parameter_dataset", "legacy_unclassified"]
     file_size: int
     uploaded_at: datetime
+
+
+UploadCategory = Literal["configuration_input", "netcdf_parameter_dataset", "legacy_unclassified"]

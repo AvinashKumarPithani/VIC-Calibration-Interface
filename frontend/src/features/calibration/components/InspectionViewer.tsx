@@ -199,6 +199,90 @@ function HydrographView({ rows }: { rows: Extract<UploadInspectionRepresentation
   );
 }
 
+function NetCDFView({ dataset }: { dataset: Extract<UploadInspectionRepresentation, { kind: "netcdf_dataset" }> }) {
+  const [query, setQuery] = useState("");
+  const filteredVariables = dataset.variables.filter((variable) =>
+    variable.name.toLowerCase().includes(query.trim().toLowerCase()),
+  );
+  const candidateVariables = filteredVariables.filter((variable) => variable.potential_calibration_candidate);
+  const otherVariables = filteredVariables.filter((variable) => !variable.potential_calibration_candidate);
+
+  function variableTable(variables: typeof dataset.variables) {
+    return (
+      <div className="overflow-x-auto rounded-lg border border-slate-200">
+        <table className="w-full min-w-[850px] text-left text-xs">
+          <thead className="bg-slate-100 font-semibold text-slate-600">
+            <tr>
+              <th className="px-3 py-2">Variable</th><th className="px-3 py-2">Dimensions / shape</th>
+              <th className="px-3 py-2">Type</th><th className="px-3 py-2">Units</th>
+              <th className="px-3 py-2">Numeric summary</th><th className="px-3 py-2">Counts</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100 bg-white">
+            {variables.map((variable) => (
+              <tr key={variable.name} className="align-top">
+                <td className="px-3 py-2 font-mono font-semibold text-slate-800">
+                  {variable.name}
+                  {variable.potential_calibration_candidate && <span className="mt-1 block max-w-48 rounded bg-amber-50 px-1.5 py-1 font-sans text-[10px] font-medium text-amber-800">Potential calibration candidate · requires scientific confirmation</span>}
+                  {Object.keys(variable.attributes).length > 0 && <details className="mt-1 font-sans font-normal">
+                    <summary className="cursor-pointer text-[10px] text-blue-700">Variable attributes</summary>
+                    <dl className="mt-1 space-y-1 text-[10px] text-slate-600">
+                      {Object.entries(variable.attributes).map(([name, value]) => <div key={name} className="break-words"><dt className="inline font-medium">{name}: </dt><dd className="inline">{typeof value === "string" ? value : JSON.stringify(value)}</dd></div>)}
+                    </dl>
+                  </details>}
+                </td>
+                <td className="px-3 py-2 text-slate-700">
+                  <div className="break-words">{variable.dimensions.length ? variable.dimensions.join(" × ") : "scalar"}</div>
+                  <div className="mt-0.5 font-mono text-[10px] text-slate-500">[{variable.shape.join(", ")}]</div>
+                </td>
+                <td className="px-3 py-2 text-slate-700">{variable.data_type}<span className="mt-0.5 block text-[10px] text-slate-500">{variable.classification}</span></td>
+                <td className="max-w-40 break-words px-3 py-2 text-slate-700">{variable.units ?? "—"}</td>
+                <td className="px-3 py-2 text-slate-700">
+                  {variable.numeric_summary ? (
+                    <div className="space-y-0.5">
+                      <div>min {variable.numeric_summary.minimum ?? "—"}</div>
+                      <div>median {variable.numeric_summary.median ?? "—"}</div>
+                      <div>max {variable.numeric_summary.maximum ?? "—"}</div>
+                    </div>
+                  ) : variable.summary_status === "limit_reached" ? "Summary skipped: size limit" : "Not numeric"}
+                </td>
+                <td className="px-3 py-2 text-[10px] text-slate-700">{variable.numeric_summary ? <span className="whitespace-nowrap">{variable.numeric_summary.finite_count.toLocaleString()} finite · {variable.numeric_summary.missing_count.toLocaleString()} missing</span> : "—"}</td>
+              </tr>
+            ))}
+            {variables.length === 0 && <tr><td colSpan={6} className="px-3 py-4 text-slate-500">No matching variables.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  return (
+    <section className="space-y-4" aria-label="NetCDF dataset inspection">
+      <details className="text-xs text-slate-500">
+        <summary className="w-fit cursor-pointer select-none rounded px-1 py-0.5 text-blue-700 hover:bg-blue-50">ⓘ About this inspection</summary>
+        <p className="mt-1 max-w-3xl rounded-md bg-slate-50 px-2 py-1.5 leading-5">Dataset metadata parsing does not validate RAT compatibility or scientific validity. Candidate labels are for discovery only, are not approved calibration controls, and all NetCDF values are read-only.</p>
+      </details>
+      <div className="rounded-lg border border-slate-200 bg-white p-3">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-600">Dataset dimensions</h3>
+        {dataset.dimensions.length ? <dl className="mt-2 flex flex-wrap gap-2">{dataset.dimensions.map((dimension) => <div key={dimension.name} className="rounded-md bg-slate-50 px-2.5 py-1.5 text-xs"><dt className="inline font-medium text-slate-700">{dimension.name}: </dt><dd className="inline text-slate-600">{dimension.size.toLocaleString()}</dd></div>)}</dl> : <p className="mt-2 text-xs text-slate-500">No named dimensions.</p>}
+        <p className="mt-2 text-xs text-slate-500">{dataset.variable_count.toLocaleString()} variables. {dataset.summary_limits}</p>
+      </div>
+      <label className="block text-xs font-medium text-slate-700">
+        Filter variables
+        <input value={query} onChange={(event) => setQuery(event.target.value)} type="search" className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm" placeholder="Search variable names..." />
+      </label>
+      <section>
+        <h3 className="mb-2 text-sm font-semibold text-slate-900">Potential calibration candidates ({candidateVariables.length})</h3>
+        {candidateVariables.length ? variableTable(candidateVariables) : <p className="rounded-md bg-slate-50 p-3 text-xs text-slate-500">No listed candidate variables were found in this dataset.</p>}
+      </section>
+      <section>
+        <h3 className="mb-2 text-sm font-semibold text-slate-900">Other dataset variables ({otherVariables.length})</h3>
+        {variableTable(otherVariables)}
+      </section>
+    </section>
+  );
+}
+
 export default function InspectionViewer({ inspection }: { inspection: UploadInspection }) {
   const representation = inspection.representation;
   if (!representation) return <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">This file could not be displayed in a supported parameter view. {inspection.parse_errors[0]?.message ?? "The backend did not return a supported representation."}</p>;
@@ -207,6 +291,7 @@ export default function InspectionViewer({ inspection }: { inspection: UploadIns
     case "vic_parameter_lines": return <VicLinesView lines={representation.lines} />;
     case "routing_positional_records": return <RoutingRecordsView records={representation.records} />;
     case "unit_hydrograph_rows": return <HydrographView rows={representation.rows} />;
+    case "netcdf_dataset": return <NetCDFView dataset={representation} />;
     default: return <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">No viewer is available for this inspection format.</p>;
   }
 }

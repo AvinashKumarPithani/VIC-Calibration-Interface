@@ -15,6 +15,7 @@ def _fake_upload(filename: str) -> Upload:
         project_id="project-id",
         job_id="job-id",
         original_filename=filename,
+        upload_category="configuration_input",
         storage_filename="generated-name",
         file_size=1,
         uploaded_at=datetime.now(timezone.utc),

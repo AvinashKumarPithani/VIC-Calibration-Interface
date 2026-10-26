@@ -6,7 +6,7 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import sessionmaker
 
@@ -16,6 +16,34 @@ from app.db import Base
 from app import models as _models  # noqa: F401 - registers ORM models with Base metadata.
 from app.models.records import RAT_CONFIGURATION_UNIQUE_INDEX
 from app.services.record_deletion import recover_staged_upload_deletions
+
+
+def migrate_upload_categories(engine: Engine) -> None:
+    """Upgrade old rows using the disjoint file choices of the two legacy UI workflows.
+
+    Tab 2 accepted YAML and TXT files; Tab 3's dedicated uploader accepted only its
+    canonical NetCDF files. Unknown extensions remain unclassified rather than being
+    guessed into either collection.
+    """
+    with engine.begin() as connection:
+        columns = {column["name"] for column in inspect(connection).get_columns("uploads")}
+        if "upload_category" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE uploads ADD COLUMN upload_category VARCHAR(40) "
+                "NOT NULL DEFAULT 'legacy_unclassified'"
+            )
+        connection.exec_driver_sql(
+            """
+            UPDATE uploads
+            SET upload_category = 'configuration_input'
+            WHERE upload_category = 'legacy_unclassified'
+              AND (
+                lower(original_filename) LIKE '%.yaml'
+                OR lower(original_filename) LIKE '%.yml'
+                OR lower(original_filename) LIKE '%.txt'
+              )
+            """
+        )
 
 
 def install_sqlite_upload_filename_enforcement(engine: Engine) -> None:
@@ -81,6 +109,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         app_settings.upload_dir.mkdir(parents=True, exist_ok=True)
         Base.metadata.create_all(bind=engine)
+        migrate_upload_categories(engine)
         if engine.dialect.name == "sqlite":
             RAT_CONFIGURATION_UNIQUE_INDEX.create(bind=engine, checkfirst=True)
             install_sqlite_upload_filename_enforcement(engine)

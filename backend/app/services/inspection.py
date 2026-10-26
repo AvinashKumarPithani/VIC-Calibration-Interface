@@ -28,6 +28,7 @@ from app.schemas.inspection import (
     YamlTreeRepresentation,
 )
 from app.services.uploads import RAT_CONFIGURATION_FILENAMES
+from app.services.parameter_drafts import approved_fields_for_inspection
 
 
 class UniqueKeySafeLoader(yaml.SafeLoader):
@@ -63,8 +64,8 @@ _RAT_SECTIONS = {
 }
 
 
-def read_stored_upload(upload: Upload, storage_dir: Path) -> bytes:
-    """Read an upload only when its generated storage name resolves inside storage_dir."""
+def stored_upload_path(upload: Upload, storage_dir: Path) -> Path:
+    """Resolve an upload's generated storage name without permitting path traversal."""
     root = storage_dir.resolve()
     stored_name = upload.storage_filename
     if (
@@ -80,6 +81,12 @@ def read_stored_upload(upload: Upload, storage_dir: Path) -> bytes:
         path.relative_to(root)
     except ValueError:
         raise HTTPException(status_code=500, detail="Stored upload location is invalid.") from None
+    return path
+
+
+def read_stored_upload(upload: Upload, storage_dir: Path) -> bytes:
+    """Read an upload only when its generated storage name resolves inside storage_dir."""
+    path = stored_upload_path(upload, storage_dir)
     try:
         return path.read_bytes()
     except FileNotFoundError:
@@ -397,10 +404,13 @@ def _result(
     errors: list[InspectionParseError],
     representation: Any = None,
 ) -> UploadInspectionRead:
-    return UploadInspectionRead(
+    result = UploadInspectionRead(
         upload=upload,
         detected_format=detected_format,
         parse_status=parse_status,
         parse_errors=errors,
         representation=representation,
     )
+    if parse_status == "parsed":
+        result.editable_fields = approved_fields_for_inspection(result)
+    return result

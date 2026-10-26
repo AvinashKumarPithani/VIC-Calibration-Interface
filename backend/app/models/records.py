@@ -3,11 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Index, String, Text, UniqueConstraint, text
+from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Index, JSON, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
-from app.services.uploads import RAT_CONFIGURATION_FILENAMES
+from app.services.uploads import LEGACY_UNCLASSIFIED_CATEGORY, RAT_CONFIGURATION_FILENAMES
 
 
 def utc_now() -> datetime:
@@ -66,11 +66,35 @@ class Upload(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     job_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    upload_category: Mapped[str] = mapped_column(
+        String(40), nullable=False, default=LEGACY_UNCLASSIFIED_CATEGORY,
+        server_default=text("'legacy_unclassified'"),
+    )
     storage_filename: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
     file_size: Mapped[int] = mapped_column(nullable=False)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     job: Mapped[Job] = relationship(back_populates="uploads")
+    parameter_draft: Mapped["ParameterDraft | None"] = relationship(back_populates="upload", cascade="all, delete-orphan", uselist=False)
+
+
+class ParameterDraft(Base):
+    """A revisioned overlay tied to one immutable uploaded source file."""
+
+    __tablename__ = "parameter_drafts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_upload_id: Mapped[str] = mapped_column(ForeignKey("uploads.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    source_format: Mapped[str] = mapped_column(String(40), nullable=False)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    revision: Mapped[int] = mapped_column(nullable=False, default=1)
+    changes: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    upload: Mapped[Upload] = relationship(back_populates="parameter_draft")
 
 
 RAT_CONFIGURATION_UNIQUE_INDEX = next(

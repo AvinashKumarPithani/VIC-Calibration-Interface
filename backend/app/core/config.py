@@ -14,6 +14,7 @@ class Settings:
     database_url: str
     upload_dir: Path
     max_upload_size_bytes: int
+    max_netcdf_upload_size_bytes: int = 256 * 1024 * 1024
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -29,13 +30,15 @@ class Settings:
 
         try:
             max_upload_size_bytes = int(os.getenv("MAX_UPLOAD_SIZE_BYTES", str(10 * 1024 * 1024)))
+            max_netcdf_upload_size_bytes = int(os.getenv("MAX_NETCDF_UPLOAD_SIZE_BYTES", str(256 * 1024 * 1024)))
         except ValueError as exc:
-            raise ValueError("MAX_UPLOAD_SIZE_BYTES must be a positive integer.") from exc
-        if max_upload_size_bytes <= 0:
-            raise ValueError("MAX_UPLOAD_SIZE_BYTES must be a positive integer.")
+            raise ValueError("Upload size limits must be positive integers.") from exc
+        if max_upload_size_bytes <= 0 or max_netcdf_upload_size_bytes <= 0:
+            raise ValueError("Upload size limits must be positive integers.")
 
         return cls(
             database_url=database_url,
             upload_dir=upload_dir,
             max_upload_size_bytes=max_upload_size_bytes,
+            max_netcdf_upload_size_bytes=max_netcdf_upload_size_bytes,
         )

@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+import hashlib
 from pathlib import Path, PureWindowsPath
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.models import Job, Project, Upload
+from app.models import Job, ParameterDraft, Project, Upload
 from app.models.records import utc_now
-from app.schemas.records import JobCreate, JobRead, ProjectCreate, ProjectRead, UploadRead
+from app.schemas.records import JobCreate, JobRead, ProjectCreate, ProjectRead, UploadCategory, UploadRead
 from app.schemas.inspection import UploadInspectionRead
-from app.services.inspection import inspect_upload_content, read_stored_upload
+from app.schemas.parameter_drafts import ParameterDraftRead, ParameterDraftSave
+from app.services.inspection import inspect_upload_content, read_stored_upload, stored_upload_path
+from app.services.netcdf_inspection import NetCDFInspectionError, inspect_netcdf_path, parse_netcdf_path
+from app.services import parameter_drafts as draft_policy
 from app.services.record_deletion import (
     UploadStorageDeletionError,
     finalize_staged_upload_files,
@@ -25,12 +29,31 @@ from app.services.uploads import (
     UploadTooLarge,
     UnsupportedUploadType,
     RAT_CONFIGURATION_FILENAMES,
+    NETCDF_UPLOAD_FILENAMES,
+    CONFIGURATION_INPUT_CATEGORY,
+    NETCDF_PARAMETER_DATASET_CATEGORY,
     is_rat_configuration_filename,
     safe_original_filename,
     store_upload,
 )
 
 router = APIRouter()
+
+
+def _get_scoped_upload(project_id: str, job_id: str, upload_id: str, db: Session) -> Upload:
+    if db.get(Project, project_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+    job = db.scalar(select(Job).where(Job.id == job_id, Job.project_id == project_id))
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found in this project.")
+    upload = db.scalar(select(Upload).where(
+        Upload.id == upload_id,
+        Upload.project_id == project_id,
+        Upload.job_id == job_id,
+    ))
+    if upload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found for this job.")
+    return upload
 
 
 def get_session(request: Request) -> Generator[Session, None, None]:
@@ -175,18 +198,13 @@ def delete_job(project_id: str, job_id: str, request: Request, db: Session = Dep
     return None
 
 
-@router.post(
-    "/api/projects/{project_id}/jobs/{job_id}/uploads",
-    response_model=UploadRead,
-    status_code=status.HTTP_201_CREATED,
-    tags=["uploads"],
-)
-async def create_upload(
+async def _create_upload(
     project_id: str,
     job_id: str,
-    file: UploadFile = File(...),
-    request: Request = None,
-    db: Session = Depends(get_session),
+    file: UploadFile,
+    request: Request,
+    db: Session,
+    upload_category: str,
 ) -> Upload:
     job = db.scalar(select(Job).where(Job.id == job_id, Job.project_id == project_id))
     if job is None:
@@ -198,6 +216,12 @@ async def create_upload(
     is_rat_upload = False
     try:
         candidate_name = safe_original_filename(file.filename)
+        candidate_extension = Path(candidate_name).suffix.lower()
+        is_netcdf_upload = upload_category == NETCDF_PARAMETER_DATASET_CATEGORY
+        if is_netcdf_upload and (candidate_extension != ".nc" or candidate_name.lower() not in NETCDF_UPLOAD_FILENAMES):
+            raise UnsupportedUploadType
+        if not is_netcdf_upload and candidate_extension == ".nc":
+            raise UnsupportedUploadType
         is_rat_upload = is_rat_configuration_filename(candidate_name)
         duplicate_filename = db.scalar(select(Upload.id).where(
             Upload.project_id == project_id,
@@ -224,16 +248,20 @@ async def create_upload(
         original_filename, storage_filename, file_size = await store_upload(
             file,
             settings.upload_dir,
-            settings.max_upload_size_bytes,
+            settings.max_netcdf_upload_size_bytes if is_netcdf_upload else settings.max_upload_size_bytes,
         )
         storage_path = settings.upload_dir / storage_filename
         record = Upload(
             project_id=project_id,
             job_id=job_id,
             original_filename=original_filename,
+            upload_category=upload_category,
             storage_filename=storage_filename,
             file_size=file_size,
         )
+        if is_netcdf_upload:
+            # Reject malformed or unsupported datasets before recording the upload.
+            parse_netcdf_path(storage_path)
         db.add(record)
         db.commit()
         db.refresh(record)
@@ -245,7 +273,19 @@ async def create_upload(
     except EmptyUpload:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty files are not accepted.") from None
     except UploadTooLarge:
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="The file exceeds the configured size limit.") from None
+        netcdf_limit_mib = settings.max_netcdf_upload_size_bytes / (1024 * 1024)
+        detail = f"The NetCDF file exceeds the configured {netcdf_limit_mib:g} MiB limit." if candidate_extension == ".nc" else "The file exceeds the configured size limit."
+        if storage_path is not None:
+            storage_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=detail) from None
+    except NetCDFInspectionError as error:
+        if storage_path is not None:
+            storage_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from None
+    except HTTPException:
+        if storage_path is not None:
+            storage_path.unlink(missing_ok=True)
+        raise
     except IntegrityError:
         db.rollback()
         if storage_path is not None:
@@ -282,16 +322,56 @@ async def create_upload(
         await file.close()
 
 
+@router.post(
+    "/api/projects/{project_id}/jobs/{job_id}/uploads",
+    response_model=UploadRead,
+    status_code=status.HTTP_201_CREATED,
+    tags=["uploads"],
+)
+async def create_configuration_upload(
+    project_id: str,
+    job_id: str,
+    file: UploadFile = File(...),
+    request: Request = None,
+    db: Session = Depends(get_session),
+) -> Upload:
+    return await _create_upload(project_id, job_id, file, request, db, CONFIGURATION_INPUT_CATEGORY)
+
+
+@router.post(
+    "/api/projects/{project_id}/jobs/{job_id}/netcdf-uploads",
+    response_model=UploadRead,
+    status_code=status.HTTP_201_CREATED,
+    tags=["uploads"],
+)
+async def create_netcdf_upload(
+    project_id: str,
+    job_id: str,
+    file: UploadFile = File(...),
+    request: Request = None,
+    db: Session = Depends(get_session),
+) -> Upload:
+    return await _create_upload(project_id, job_id, file, request, db, NETCDF_PARAMETER_DATASET_CATEGORY)
+
+
 @router.get(
     "/api/projects/{project_id}/jobs/{job_id}/uploads",
     response_model=list[UploadRead],
     tags=["uploads"],
 )
-def list_uploads(project_id: str, job_id: str, db: Session = Depends(get_session)) -> list[Upload]:
+def list_uploads(
+    project_id: str,
+    job_id: str,
+    category: UploadCategory | None = Query(default=None),
+    db: Session = Depends(get_session),
+) -> list[Upload]:
     job = db.scalar(select(Job).where(Job.id == job_id, Job.project_id == project_id))
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found in this project.")
-    statement = select(Upload).where(Upload.project_id == project_id, Upload.job_id == job_id).order_by(Upload.uploaded_at.desc(), Upload.id)
+    statement = select(Upload).where(Upload.project_id == project_id, Upload.job_id == job_id)
+    if category is not None:
+        statement = statement.where(Upload.upload_category == category)
+    statement = statement.order_by(Upload.uploaded_at.desc(), Upload.id)
     return list(db.scalars(statement).all())
 
 
@@ -305,6 +385,7 @@ def inspect_job_upload(
     job_id: str,
     upload_id: str,
     request: Request,
+    category: UploadCategory | None = Query(default=None),
     db: Session = Depends(get_session),
 ) -> UploadInspectionRead:
     if db.get(Project, project_id) is None:
@@ -319,8 +400,139 @@ def inspect_job_upload(
     ))
     if upload is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found for this job.")
+    if category is not None and upload.upload_category != category:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found in this collection.")
+    if Path(upload.original_filename).suffix.lower() == ".nc":
+        if upload.original_filename.lower() not in NETCDF_UPLOAD_FILENAMES:
+            raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="This NetCDF filename is not supported.")
+        netcdf_path = stored_upload_path(upload, request.app.state.settings.upload_dir)
+        if not netcdf_path.is_file():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Uploaded file content is unavailable.")
+        return inspect_netcdf_path(upload, netcdf_path)
     content = read_stored_upload(upload, request.app.state.settings.upload_dir)
     return inspect_upload_content(upload, content)
+
+@router.get(
+    "/api/projects/{project_id}/jobs/{job_id}/uploads/{upload_id}/draft",
+    response_model=ParameterDraftRead | None,
+    tags=["parameter drafts"],
+)
+def get_parameter_draft(
+    project_id: str, job_id: str, upload_id: str, request: Request, db: Session = Depends(get_session),
+) -> ParameterDraft | None:
+    upload = _get_scoped_upload(project_id, job_id, upload_id, db)
+    draft = db.scalar(select(ParameterDraft).where(
+        ParameterDraft.project_id == project_id,
+        ParameterDraft.job_id == job_id,
+        ParameterDraft.source_upload_id == upload_id,
+    ))
+    if draft is None:
+        return None
+    content = read_stored_upload(upload, request.app.state.settings.upload_dir)
+    if hashlib.sha256(content).hexdigest() != draft.source_sha256:
+        db.delete(draft)
+        try:
+            db.commit()
+        except SQLAlchemyError:
+            db.rollback()
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="The stale parameter draft could not be cleared.") from None
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The source upload changed. Its saved draft was cleared.")
+    return draft
+
+
+@router.put(
+    "/api/projects/{project_id}/jobs/{job_id}/uploads/{upload_id}/draft",
+    response_model=ParameterDraftRead,
+    tags=["parameter drafts"],
+)
+def save_parameter_draft(
+    project_id: str,
+    job_id: str,
+    upload_id: str,
+    payload: ParameterDraftSave,
+    request: Request,
+    db: Session = Depends(get_session),
+) -> ParameterDraft:
+    upload = _get_scoped_upload(project_id, job_id, upload_id, db)
+    content = read_stored_upload(upload, request.app.state.settings.upload_dir)
+    inspection = inspect_upload_content(upload, content)
+    if inspection.parse_status != "parsed" or inspection.representation is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Only successfully parsed supported files can have a parameter draft.")
+    if payload.source_format != inspection.detected_format:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The source file format changed. Reload its inspection before saving.")
+    changes = draft_policy.validate_draft_changes(inspection, payload.changes)
+    fingerprint = hashlib.sha256(content).hexdigest()
+    draft = db.scalar(select(ParameterDraft).where(
+        ParameterDraft.project_id == project_id,
+        ParameterDraft.job_id == job_id,
+        ParameterDraft.source_upload_id == upload_id,
+    ).with_for_update())
+    try:
+        if draft is None:
+            if payload.expected_revision is not None:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The draft changed or was removed. Reload it before saving.")
+            draft = ParameterDraft(
+                project_id=project_id, job_id=job_id, source_upload_id=upload_id,
+                source_format=inspection.detected_format, source_sha256=fingerprint,
+                revision=1, changes=changes,
+            )
+            db.add(draft)
+        else:
+            if payload.expected_revision != draft.revision:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The draft has a newer revision. Reload it before saving.")
+            updated = db.execute(update(ParameterDraft).where(
+                ParameterDraft.id == draft.id,
+                ParameterDraft.revision == payload.expected_revision,
+            ).values(
+                source_format=inspection.detected_format,
+                source_sha256=fingerprint,
+                revision=draft.revision + 1,
+                changes=changes,
+                updated_at=utc_now(),
+            ))
+            if updated.rowcount != 1:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The draft has a newer revision. Reload it before saving.")
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The parameter draft changed concurrently. Reload it before saving.") from None
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="The parameter draft could not be saved.") from None
+    saved_draft = db.scalar(select(ParameterDraft).where(
+        ParameterDraft.project_id == project_id,
+        ParameterDraft.job_id == job_id,
+        ParameterDraft.source_upload_id == upload_id,
+    ))
+    if saved_draft is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="The saved parameter draft could not be loaded.")
+    return saved_draft
+
+
+@router.delete(
+    "/api/projects/{project_id}/jobs/{job_id}/uploads/{upload_id}/draft",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["parameter drafts"],
+)
+def discard_parameter_draft(project_id: str, job_id: str, upload_id: str, db: Session = Depends(get_session)) -> None:
+    _get_scoped_upload(project_id, job_id, upload_id, db)
+    draft = db.scalar(select(ParameterDraft).where(
+        ParameterDraft.project_id == project_id,
+        ParameterDraft.job_id == job_id,
+        ParameterDraft.source_upload_id == upload_id,
+    ))
+    if draft is not None:
+        db.delete(draft)
+        try:
+            db.commit()
+        except SQLAlchemyError:
+            db.rollback()
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="The parameter draft could not be discarded.") from None
+    return None
+
 
 @router.delete(
     "/api/projects/{project_id}/jobs/{job_id}/uploads/{upload_id}",
@@ -332,6 +544,7 @@ def delete_upload(
     job_id: str,
     upload_id: str,
     request: Request,
+    category: UploadCategory | None = Query(default=None),
     db: Session = Depends(get_session),
 ) -> None:
     if db.get(Project, project_id) is None:
@@ -348,6 +561,8 @@ def delete_upload(
     ))
     if upload is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found for this job.")
+    if category is not None and upload.upload_category != category:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found in this collection.")
 
     storage_dir = Path(request.app.state.settings.upload_dir).resolve()
     stored_name = upload.storage_filename

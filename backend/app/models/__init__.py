@@ -1,3 +1,3 @@
-from .records import Job, Project, Upload
+from .records import Job, ParameterDraft, Project, Upload
 
-__all__ = ["Job", "Project", "Upload"]
+__all__ = ["Job", "ParameterDraft", "Project", "Upload"]

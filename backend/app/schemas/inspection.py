@@ -79,12 +79,60 @@ class UnitHydrographRepresentation(BaseModel):
     rows: list[UnitHydrographRow]
 
 
+class NetCDFDimension(BaseModel):
+    name: str
+    size: int
+
+
+class NetCDFNumericSummary(BaseModel):
+    finite_count: int
+    missing_count: int
+    minimum: float | None
+    maximum: float | None
+    median: float | None
+
+
+class NetCDFVariable(BaseModel):
+    name: str
+    dimensions: list[str]
+    shape: list[int]
+    data_type: str
+    classification: Literal["numeric", "categorical", "other"]
+    units: str | None = None
+    attributes: dict[str, Any] = {}
+    numeric_summary: NetCDFNumericSummary | None = None
+    summary_status: Literal["complete", "limit_reached", "not_numeric"]
+    potential_calibration_candidate: bool = False
+
+
+class NetCDFDatasetRepresentation(BaseModel):
+    kind: Literal["netcdf_dataset"] = "netcdf_dataset"
+    dimensions: list[NetCDFDimension]
+    variables: list[NetCDFVariable]
+    variable_count: int
+    summary_limits: str
+
+
 InspectionRepresentation = (
     YamlTreeRepresentation
     | VicTextRepresentation
     | RoutingTextRepresentation
     | UnitHydrographRepresentation
+    | NetCDFDatasetRepresentation
 )
+
+
+class EditableParameterField(BaseModel):
+    """A parameter that has explicit, server-approved editing metadata."""
+
+    field_id: str
+    label: str
+    data_type: Literal["string", "integer", "number", "boolean"]
+    current_value: Any
+    required: bool = False
+    minimum: int | float | None = None
+    maximum: int | float | None = None
+    allowed_values: list[Any] = []
 
 
 class UploadInspectionRead(BaseModel):
@@ -95,6 +143,7 @@ class UploadInspectionRead(BaseModel):
         "vic_global_text",
         "routing_parameter_text",
         "unit_hydrograph_text",
+        "vic_netcdf",
         "unknown",
     ]
     parse_status: Literal["parsed", "malformed", "unsupported"]
@@ -103,3 +152,4 @@ class UploadInspectionRead(BaseModel):
     dependency_availability: Literal["not_checked"] = "not_checked"
     scientific_validity: Literal["not_checked"] = "not_checked"
     representation: InspectionRepresentation | None = None
+    editable_fields: list[EditableParameterField] = []

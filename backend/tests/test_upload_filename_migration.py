@@ -96,3 +96,64 @@ def test_startup_preserves_legacy_duplicate_uploads_and_migration_is_repeatable(
         ("legacy-upload-a", "legacy-a.txt"),
         ("legacy-upload-b", "legacy-b.txt"),
     ]
+
+
+def test_pre_category_database_classifies_legacy_tab2_inputs_without_touching_bytes(tmp_path: Path) -> None:
+    database_path = tmp_path / "pre_category.sqlite3"
+    upload_dir = tmp_path / "legacy_uploads"
+    settings = Settings(
+        database_url=f"sqlite:///{database_path.as_posix()}",
+        upload_dir=upload_dir,
+        max_upload_size_bytes=64,
+    )
+    seed_engine = create_engine(settings.database_url)
+    Base.metadata.create_all(seed_engine)
+    with Session(seed_engine) as session:
+        project = Project(name="Legacy project")
+        job = Job(name="Legacy job", project=project)
+        session.add(job)
+        session.flush()
+        project_id, job_id = project.id, job.id
+        session.commit()
+    with seed_engine.begin() as connection:
+        connection.exec_driver_sql("ALTER TABLE uploads DROP COLUMN upload_category")
+        connection.exec_driver_sql(
+            "INSERT INTO uploads (id, project_id, job_id, original_filename, storage_filename, file_size, uploaded_at) "
+            "VALUES ('legacy-yaml', ?, ?, 'rat_config.yaml', 'legacy-yaml.bin', 5, '2025-01-01 00:00:00.000000')",
+            (project_id, job_id),
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO uploads (id, project_id, job_id, original_filename, storage_filename, file_size, uploaded_at) "
+            "VALUES ('legacy-netcdf', ?, ?, 'vic_soil_param.nc', 'legacy-netcdf.bin', 5, '2025-01-01 00:00:00.000000')",
+            (project_id, job_id),
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO uploads (id, project_id, job_id, original_filename, storage_filename, file_size, uploaded_at) "
+            "VALUES ('legacy-unknown', ?, ?, 'forcing.csv', 'legacy-unknown.bin', 5, '2025-01-01 00:00:00.000000')",
+            (project_id, job_id),
+        )
+    seed_engine.dispose()
+    upload_dir.mkdir()
+    (upload_dir / "legacy-yaml.bin").write_bytes(b"yaml!")
+    (upload_dir / "legacy-netcdf.bin").write_bytes(b"netcd")
+    (upload_dir / "legacy-unknown.bin").write_bytes(b"csv!!")
+
+    for _ in range(2):
+        with TestClient(create_app(settings)) as client:
+            root = f"/api/projects/{project_id}/jobs/{job_id}/uploads"
+            all_records = client.get(root).json()
+            categories = {record["id"]: record["upload_category"] for record in all_records}
+            assert categories == {
+                "legacy-yaml": "configuration_input",
+                "legacy-netcdf": "legacy_unclassified",
+                "legacy-unknown": "legacy_unclassified",
+            }
+            config_records = client.get(root, params={"category": "configuration_input"}).json()
+            assert [record["id"] for record in config_records] == ["legacy-yaml"]
+            assert client.get(root, params={"category": "netcdf_parameter_dataset"}).json() == []
+            legacy_records = client.get(root, params={"category": "legacy_unclassified"}).json()
+            assert {record["id"] for record in legacy_records} == {"legacy-netcdf", "legacy-unknown"}
+
+    assert (upload_dir / "legacy-yaml.bin").read_bytes() == b"yaml!"
+    assert (upload_dir / "legacy-netcdf.bin").read_bytes() == b"netcd"
+    assert (upload_dir / "legacy-unknown.bin").read_bytes() == b"csv!!"
