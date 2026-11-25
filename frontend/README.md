@@ -32,4 +32,4 @@ npm run build
 npm run preview
 ```
 
-The current tabs are placeholders. The frontend uses mock-free placeholder content and has no backend, persistence, or scientific execution integration yet. UI reference images are kept in `prototype-1/`.
+The Stage I frontend provides project and job management in **Setup**, configuration and input upload/inspection in **Inputs**, and NetCDF parameter inspection and editing in **Parameters & Calibration**. These routes connect to the FastAPI backend for project/job records, uploaded files, inspections, and supported parameter edits. **Run & Results** is a planned route; RAT execution and scientific results are not yet implemented. UI reference images are kept in `prototype-1/`. See the [root README](../README.md) for the full architecture, visual assets, local development setup, and Stage II roadmap.
